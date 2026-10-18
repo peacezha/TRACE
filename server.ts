@@ -1511,9 +1511,9 @@ async function buildClusterSnapshot(sessionId: string, timeoutMs = 2_500) {
   const s = getSession(sessionId);
   if (!s) return undefined;
   try {
-    const cmd = clusterContext.buildSnapshotCommand('standard');
+    const cmd = clusterContext.buildSnapshotCommand('standard', s.cluster.scheduler);
     const output = await s.cluster.exec(cmd, timeoutMs);
-    const snapshot = clusterContext.parse(output);
+    const snapshot = clusterContext.parse(output, s.cluster.scheduler);
     clusterContext.setCache(sessionId, snapshot);
     return snapshot;
   } catch {

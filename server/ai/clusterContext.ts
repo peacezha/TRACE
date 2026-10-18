@@ -157,13 +157,30 @@ export function parseQuotaOutput(raw: string): QuotaInfo | null {
   };
 }
 
-const SNAPSHOT_COMMANDS: Record<SnapshotDepth, string> = {
-  // 默认快照不读取文件列表。需要文件时由用户明确选择目录，Agent 再定点读取。
-  standard: 'echo "===PWD==="; pwd; echo "===JOBS==="; bjobs -w 2>/dev/null | head -20; echo "===QUOTA==="; quota -s 2>/dev/null | head -5; true',
-  full: 'echo "===PWD==="; pwd; echo "===FILES==="; ls -lhR --time-style=long-iso 2>/dev/null | head -500; echo "===JOBS==="; bjobs -w 2>/dev/null | head -30; echo "===QUEUES==="; bqueues 2>/dev/null | head -20; echo "===MODULES==="; module list 2>/dev/null; echo "===QUOTA==="; quota -s 2>/dev/null | head -10; true',
+// 快照按调度器选命令:LSF bjobs/bqueues、Slurm squeue/sinfo、PBS qstat、Donau djob/dqueue、无调度器跳过。
+type SnapshotScheduler = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+const SNAPSHOT_JOB_QUEUE_COMMANDS: Record<SnapshotScheduler, { jobs: string; queues: string }> = {
+  lsf: { jobs: 'bjobs -w 2>/dev/null | head -30', queues: 'bqueues 2>/dev/null | head -20' },
+  slurm: { jobs: 'squeue -u "$(whoami)" 2>/dev/null | head -30', queues: 'sinfo -s 2>/dev/null | head -20' },
+  pbs: { jobs: 'qstat -u "$(whoami)" 2>/dev/null | head -30', queues: 'qstat -q 2>/dev/null | head -20' },
+  donau: { jobs: 'djob 2>/dev/null | head -30', queues: 'dqueue 2>/dev/null | head -20' },
+  none: { jobs: 'true', queues: 'true' },
 };
 
-function parseSnapshotOutput(raw: string): ClusterSnapshot {
+function snapshotScheduler(scheduler?: string): SnapshotScheduler {
+  return scheduler === 'slurm' || scheduler === 'pbs' || scheduler === 'donau' || scheduler === 'none' ? scheduler : 'lsf';
+}
+
+function buildSnapshotCommand(depth: SnapshotDepth, scheduler?: string): string {
+  const jq = SNAPSHOT_JOB_QUEUE_COMMANDS[snapshotScheduler(scheduler)];
+  if (depth === 'full') {
+    return `echo "===PWD==="; pwd; echo "===FILES==="; ls -lhR --time-style=long-iso 2>/dev/null | head -500; echo "===JOBS==="; ${jq.jobs}; echo "===QUEUES==="; ${jq.queues}; echo "===MODULES==="; module list 2>/dev/null; echo "===QUOTA==="; quota -s 2>/dev/null | head -10; true`;
+  }
+  // 默认快照不读取文件列表。需要文件时由用户明确选择目录,Agent 再定点读取。
+  return `echo "===PWD==="; pwd; echo "===JOBS==="; ${jq.jobs}; echo "===QUOTA==="; quota -s 2>/dev/null | head -5; true`;
+}
+
+function parseSnapshotOutput(raw: string, scheduler?: string): ClusterSnapshot {
   const sections: Record<string, string> = {};
   let currentSection = '__preamble__';
 
@@ -178,7 +195,12 @@ function parseSnapshotOutput(raw: string): ClusterSnapshot {
   }
 
   const files = parseLsOutput(sections['files'] ?? '');
-  const jobs = parseBjobsOutput(sections['jobs'] ?? '');
+  const sched = snapshotScheduler(scheduler);
+  const jobs = sched === 'slurm' ? parseSqueueOutput(sections['jobs'] ?? '')
+    : sched === 'pbs' ? parseQstatOutput(sections['jobs'] ?? '')
+    : sched === 'donau' ? parseDjobOutput(sections['jobs'] ?? '')
+    : sched === 'none' ? []
+    : parseBjobsOutput(sections['jobs'] ?? '');
   const quota = parseQuotaOutput(sections['quota'] ?? '');
   const modulesStr = sections['modules'] ?? '';
   const modules = modulesStr
@@ -201,12 +223,12 @@ export class ClusterContextProvider {
   private cache: Map<string, { snapshot: ClusterSnapshot; timestamp: number }> = new Map();
   private cacheTTL = 120000;
 
-  buildSnapshotCommand(depth: SnapshotDepth): string {
-    return SNAPSHOT_COMMANDS[depth];
+  buildSnapshotCommand(depth: SnapshotDepth, scheduler?: string): string {
+    return buildSnapshotCommand(depth, scheduler);
   }
 
-  parse(rawOutput: string): ClusterSnapshot {
-    return parseSnapshotOutput(rawOutput);
+  parse(rawOutput: string, scheduler?: string): ClusterSnapshot {
+    return parseSnapshotOutput(rawOutput, scheduler);
   }
 
   getCached(key: string): ClusterSnapshot | null {
@@ -270,3 +292,122 @@ function formatSize(bytes: number): string {
 }
 
 export const clusterContext = new ClusterContextProvider();
+
+// ── Donau(多瑙)/ PBS 作业解析:从 notifications/scheduler.ts 上移,
+// 保持本模块为最底层解析器,供快照与监控共用,scheduler.ts 里为再导出。 ──
+
+// ── Donau（多瑙）────────────────────────────────────────────────────
+// 状态机（按技能文档）：WAITING 等待调度 / PENDING 排队 / RUNNING 运行 /
+// STOPPED 已停止 / SSTOPPED 系统停止 / FAILED 失败 / SUCCEEDED 成功。
+// SSTOPPED 含子串 STOPPED，交替匹配必须把长词放前面（\b 已保证不互串，顺序是双保险）。
+const DONAU_STATUS_RE = /\b(SSTOPPED|WAITING|PENDING|RUNNING|STOPPED|FAILED|SUCCEEDED)\b/i;
+
+export function normalizeDonauStatus(raw: string): JobEntry['status'] {
+  switch (raw.trim().toUpperCase()) {
+    case 'RUNNING': return 'RUN';
+    case 'WAITING':
+    case 'PENDING': return 'PEND';
+    case 'SUCCEEDED': return 'DONE';
+    case 'FAILED':
+    case 'STOPPED':
+    case 'SSTOPPED': return 'EXIT';
+    default: return 'UNKNOWN';
+  }
+}
+
+/**
+ * 容错解析 `djob` 列表输出。没有真实 djob 输出样例可参照（文档只给出状态名与
+ * --output 可用列名），因此不写死列位置：
+ * 1. 优先按文档 alias 的列序 `jobId name user state queue …` 整行匹配；
+ * 2. 否则退化为"行内含状态关键词 + 首个纯数字 token 作为作业号"。
+ */
+export function parseDjobOutput(raw: string): JobEntry[] {
+  const out: JobEntry[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const row = line.match(/^\s*(\d+)\s+(\S+)\s+\S+\s+(SSTOPPED|WAITING|PENDING|RUNNING|STOPPED|FAILED|SUCCEEDED)\s+(\S+)/i);
+    if (row) {
+      if (seen.has(row[1])) continue;
+      seen.add(row[1]);
+      out.push({ jobId: row[1], name: row[2], status: normalizeDonauStatus(row[3]), cores: 0, queue: row[4], runtime: '' });
+      continue;
+    }
+    const statusMatch = line.match(DONAU_STATUS_RE);
+    if (!statusMatch) continue;
+    const tokens = line.trim().split(/\s+/);
+    const idIdx = tokens.findIndex(t => /^\d+$/.test(t));
+    if (idIdx < 0) continue;
+    const jobId = tokens[idIdx];
+    if (seen.has(jobId)) continue;
+    seen.add(jobId);
+    const statusToken = statusMatch[1].toUpperCase();
+    const name = tokens.slice(idIdx + 1).find(t => t.toUpperCase() !== statusToken && !/^\d+$/.test(t) && !/[:=]/.test(t));
+    out.push({ jobId, name: name || `Job ${jobId}`, status: normalizeDonauStatus(statusToken), cores: 0, queue: '', runtime: '' });
+  }
+  return out;
+}
+
+
+/** 解析 donauJobsByIdsCommand 的输出：按 DJOB_ID: 标记分节，节内第一个状态关键词即该作业状态。 */
+export function parseDonauJobsByIdsOutput(raw: string): Array<{ jobId: string; status: JobEntry['status'] }> {
+  const out: Array<{ jobId: string; status: JobEntry['status'] }> = [];
+  let currentId = '';
+  let currentStatus: JobEntry['status'] | null = null;
+  const flush = () => {
+    if (currentId && currentStatus) out.push({ jobId: currentId, status: currentStatus });
+    currentStatus = null;
+  };
+  for (const line of raw.split(/\r?\n/)) {
+    const marker = line.match(/^\s*DJOB_ID:(\d+)\s*$/);
+    if (marker) {
+      flush();
+      currentId = marker[1];
+      continue;
+    }
+    if (!currentId || currentStatus) continue;
+    const statusMatch = line.match(DONAU_STATUS_RE);
+    if (statusMatch) currentStatus = normalizeDonauStatus(statusMatch[1]);
+  }
+  flush();
+  return out;
+}
+
+/**
+ * `djob -l <id>` 输出的终态判定：SUCCEEDED → DONE，FAILED/STOPPED/SSTOPPED → EXIT；
+ * 活跃态（WAITING/PENDING/RUNNING）或查无关键词 → undefined（由调用方按下轮再查处理）。
+ */
+export function parseDjobFinalState(raw: string): 'DONE' | 'EXIT' | undefined {
+  const m = raw.match(/\b(SUCCEEDED|FAILED|SSTOPPED|STOPPED)\b/i);
+  if (!m) return undefined;
+  return m[1].toUpperCase() === 'SUCCEEDED' ? 'DONE' : 'EXIT';
+}
+
+/** PBS qstat 状态字母 → TRACE 作业状态 */
+function normalizePbsStatus(letter: string): JobEntry['status'] {
+  const s = letter.trim().toUpperCase();
+  if (s === 'R' || s === 'E') return 'RUN';
+  if (s === 'Q' || s === 'H' || s === 'W' || s === 'T' || s === 'S') return 'PEND';
+  if (s === 'C' || s === 'F') return 'DONE';
+  return 'UNKNOWN';
+}
+
+export function parseQstatOutput(raw: string): JobEntry[] {
+  return raw
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('-') && !/^job\s*id/i.test(l) && !/^job_id/i.test(l))
+    .map(line => {
+      const parts = line.split(/\s+/);
+      return {
+        jobId: (parts[0] ?? '').split('.')[0],
+        name: parts[1] ?? parts[0] ?? '',
+        status: normalizePbsStatus(parts[4] ?? ''),
+        cores: 0,
+        queue: parts[5] ?? '',
+        runtime: parts[3] ?? '',
+      };
+    })
+    .filter(j => j.jobId);
+}
+

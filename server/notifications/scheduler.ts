@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
-import { parseBjobsOutput, parseSqueueOutput } from '../ai/clusterContext';
+import { parseBjobsOutput, parseSqueueOutput, parseQstatOutput, parseDjobOutput } from '../ai/clusterContext';
 import type { JobEntry } from '../ai/types';
 import type { SchedulerKind } from '../cluster/schedulerProfile';
 
@@ -82,57 +82,9 @@ export function parseLsfJobsByIdsOutput(raw: string): Array<{ jobId: string; sta
   return out;
 }
 
-// ── Donau（多瑙）────────────────────────────────────────────────────
-// 状态机（按技能文档）：WAITING 等待调度 / PENDING 排队 / RUNNING 运行 /
-// STOPPED 已停止 / SSTOPPED 系统停止 / FAILED 失败 / SUCCEEDED 成功。
-// SSTOPPED 含子串 STOPPED，交替匹配必须把长词放前面（\b 已保证不互串，顺序是双保险）。
-const DONAU_STATUS_RE = /\b(SSTOPPED|WAITING|PENDING|RUNNING|STOPPED|FAILED|SUCCEEDED)\b/i;
-
-function normalizeDonauStatus(raw: string): JobEntry['status'] {
-  switch (raw.trim().toUpperCase()) {
-    case 'RUNNING': return 'RUN';
-    case 'WAITING':
-    case 'PENDING': return 'PEND';
-    case 'SUCCEEDED': return 'DONE';
-    case 'FAILED':
-    case 'STOPPED':
-    case 'SSTOPPED': return 'EXIT';
-    default: return 'UNKNOWN';
-  }
-}
-
-/**
- * 容错解析 `djob` 列表输出。没有真实 djob 输出样例可参照（文档只给出状态名与
- * --output 可用列名），因此不写死列位置：
- * 1. 优先按文档 alias 的列序 `jobId name user state queue …` 整行匹配；
- * 2. 否则退化为"行内含状态关键词 + 首个纯数字 token 作为作业号"。
- */
-export function parseDjobOutput(raw: string): JobEntry[] {
-  const out: JobEntry[] = [];
-  const seen = new Set<string>();
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const row = line.match(/^\s*(\d+)\s+(\S+)\s+\S+\s+(SSTOPPED|WAITING|PENDING|RUNNING|STOPPED|FAILED|SUCCEEDED)\s+(\S+)/i);
-    if (row) {
-      if (seen.has(row[1])) continue;
-      seen.add(row[1]);
-      out.push({ jobId: row[1], name: row[2], status: normalizeDonauStatus(row[3]), cores: 0, queue: row[4], runtime: '' });
-      continue;
-    }
-    const statusMatch = line.match(DONAU_STATUS_RE);
-    if (!statusMatch) continue;
-    const tokens = line.trim().split(/\s+/);
-    const idIdx = tokens.findIndex(t => /^\d+$/.test(t));
-    if (idIdx < 0) continue;
-    const jobId = tokens[idIdx];
-    if (seen.has(jobId)) continue;
-    seen.add(jobId);
-    const statusToken = statusMatch[1].toUpperCase();
-    const name = tokens.slice(idIdx + 1).find(t => t.toUpperCase() !== statusToken && !/^\d+$/.test(t) && !/[:=]/.test(t));
-    out.push({ jobId, name: name || `Job ${jobId}`, status: normalizeDonauStatus(statusToken), cores: 0, queue: '', runtime: '' });
-  }
-  return out;
-}
+// 解析器已上移到 ../ai/clusterContext(快照与监控共用,打破 import 环);此处再导出保持兼容。
+export { parseDjobOutput, parseDonauJobsByIdsOutput, parseDjobFinalState, parseQstatOutput } from '../ai/clusterContext';
+export { normalizeDonauStatus } from '../ai/clusterContext';
 
 /**
  * Donau 按 ID 定点查询：djob 没有多 ID 参数，循环逐个 `djob <id>` 串成一条命令。
@@ -146,67 +98,6 @@ export function donauJobsByIdsCommand(jobIds: string[]): string {
     : 'true';
 }
 
-/** 解析 donauJobsByIdsCommand 的输出：按 DJOB_ID: 标记分节，节内第一个状态关键词即该作业状态。 */
-export function parseDonauJobsByIdsOutput(raw: string): Array<{ jobId: string; status: JobEntry['status'] }> {
-  const out: Array<{ jobId: string; status: JobEntry['status'] }> = [];
-  let currentId = '';
-  let currentStatus: JobEntry['status'] | null = null;
-  const flush = () => {
-    if (currentId && currentStatus) out.push({ jobId: currentId, status: currentStatus });
-    currentStatus = null;
-  };
-  for (const line of raw.split(/\r?\n/)) {
-    const marker = line.match(/^\s*DJOB_ID:(\d+)\s*$/);
-    if (marker) {
-      flush();
-      currentId = marker[1];
-      continue;
-    }
-    if (!currentId || currentStatus) continue;
-    const statusMatch = line.match(DONAU_STATUS_RE);
-    if (statusMatch) currentStatus = normalizeDonauStatus(statusMatch[1]);
-  }
-  flush();
-  return out;
-}
-
-/**
- * `djob -l <id>` 输出的终态判定：SUCCEEDED → DONE，FAILED/STOPPED/SSTOPPED → EXIT；
- * 活跃态（WAITING/PENDING/RUNNING）或查无关键词 → undefined（由调用方按下轮再查处理）。
- */
-export function parseDjobFinalState(raw: string): 'DONE' | 'EXIT' | undefined {
-  const m = raw.match(/\b(SUCCEEDED|FAILED|SSTOPPED|STOPPED)\b/i);
-  if (!m) return undefined;
-  return m[1].toUpperCase() === 'SUCCEEDED' ? 'DONE' : 'EXIT';
-}
-
-/** PBS qstat 状态字母 → TRACE 作业状态 */
-function normalizePbsStatus(letter: string): JobEntry['status'] {
-  const s = letter.trim().toUpperCase();
-  if (s === 'R' || s === 'E') return 'RUN';
-  if (s === 'Q' || s === 'H' || s === 'W' || s === 'T' || s === 'S') return 'PEND';
-  if (s === 'C' || s === 'F') return 'DONE';
-  return 'UNKNOWN';
-}
-
-export function parseQstatOutput(raw: string): JobEntry[] {
-  return raw
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l && !l.startsWith('-') && !/^job\s*id/i.test(l) && !/^job_id/i.test(l))
-    .map(line => {
-      const parts = line.split(/\s+/);
-      return {
-        jobId: (parts[0] ?? '').split('.')[0],
-        name: parts[1] ?? parts[0] ?? '',
-        status: normalizePbsStatus(parts[4] ?? ''),
-        cores: 0,
-        queue: parts[5] ?? '',
-        runtime: parts[3] ?? '',
-      };
-    })
-    .filter(j => j.jobId);
-}
 
 export function parseJobsOutput(scheduler: SchedulerType, raw: string): JobEntry[] {
   if (scheduler === 'slurm') return parseSqueueOutput(raw);

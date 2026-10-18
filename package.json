@@ -1,7 +1,7 @@
 {
   "name": "trace",
   "private": true,
-  "version": "0.5.8",
+  "version": "0.5.9",
   "productName": "TRACE",
   "type": "module",
   "main": "electron/main.cjs",

@@ -86,3 +86,4 @@ tmp/
 !vendor/**/conversations/**
 # node-pty uses the matching per-platform prebuild, not a local Windows build.
 vendor/dsh/node_modules/node-pty/build/
+transfers.json.tmp
