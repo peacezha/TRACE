@@ -167,6 +167,7 @@ function preferUnpackedDir(p: string): string {
 }
 const APP_SKILLS_DIR = preferUnpackedDir(appPath('skills'));
 const LSF_SKILLS_DIR = appPath('lsf_skills');
+const DONAU_SKILLS_DIR = appPath('donau_skills');
 const CONVERSATIONS_DIR = ensureDir(dataPath('conversations'));
 const localConversationStore = new LocalConversationStore(CONVERSATIONS_DIR);
 
@@ -294,6 +295,7 @@ async function resumeFinishedFormalWorkflowRun(sessionId: string, run: any, jobI
       home: s.home,
       skillsDir: APP_SKILLS_DIR,
       lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
       userSkillsDir: USER_SKILLS_DIR,
       runtimeConfig: {
         planningPolicy: 'auto',
@@ -526,7 +528,7 @@ jobWatcher.configure({
         {
           dataRoot: DATA_ROOT,
           pluginSourceDir: appPath('vendor', 'dsh-plugin'),
-          skillDirs: [APP_SKILLS_DIR, USER_SKILLS_DIR, LSF_SKILLS_DIR, path.join(APP_SKILLS_DIR, 'bio'), path.join(APP_SKILLS_DIR, 'hpc')],
+          skillDirs: [APP_SKILLS_DIR, USER_SKILLS_DIR, LSF_SKILLS_DIR, DONAU_SKILLS_DIR, path.join(APP_SKILLS_DIR, 'bio'), path.join(APP_SKILLS_DIR, 'hpc')],
           getBinding,
           markResumed,
           exec: (sid, cmd, timeout) => {
@@ -558,6 +560,7 @@ jobWatcher.configure({
         loadProfile: loadServerAiProfile,
         skillsDir: APP_SKILLS_DIR,
         lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
         userSkillsDir: USER_SKILLS_DIR,
         appendConversation: appendJobResumeConversation,
         loadConversation: readJobResumeConversation,
@@ -1103,6 +1106,7 @@ function loadSkillIndex() {
   return loadOrRefreshSkillIndex({
     skillsDir: APP_SKILLS_DIR,
     lsfSkillDir: LSF_SKILLS_DIR,
+    donauSkillDir: DONAU_SKILLS_DIR,
     userSkillsDir: USER_SKILLS_DIR,
     indexPath: path.join(USER_SKILLS_DIR, '.skill-index.json'),
   });
@@ -1121,6 +1125,7 @@ async function loadSkillIndexForRequest(req: Request) {
   return loadOrRefreshSkillIndex({
     skillsDir: APP_SKILLS_DIR,
     lsfSkillDir: LSF_SKILLS_DIR,
+    donauSkillDir: DONAU_SKILLS_DIR,
     userSkillsDir: USER_SKILLS_DIR,
     indexPath: path.join(USER_SKILLS_DIR, '.skill-index.json'),
     clusterSkills,
@@ -1161,6 +1166,7 @@ app.get('/api/skills/content', (req, res) => {
     const index = loadOrRefreshSkillIndex({
       skillsDir: APP_SKILLS_DIR,
       lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
       userSkillsDir: USER_SKILLS_DIR,
       indexPath: path.join(USER_SKILLS_DIR, '.skill-index.json'),
       clusterSkills,
@@ -1185,7 +1191,7 @@ app.post('/api/skills', async (req, res) => {
     }
     const ok = await installSkillFromSource(
       { type: 'local', filename, content },
-      { skillsDir: APP_SKILLS_DIR, lsfSkillDir: LSF_SKILLS_DIR, userSkillsDir: USER_SKILLS_DIR },
+      { skillsDir: APP_SKILLS_DIR, lsfSkillDir: LSF_SKILLS_DIR, donauSkillDir: DONAU_SKILLS_DIR, userSkillsDir: USER_SKILLS_DIR },
     );
     res.json({ success: ok });
   } catch (err: any) {
@@ -1901,7 +1907,7 @@ app.post('/api/ai/stream', async (req, res) => {
           confirmationPolicy: req.body?.agentConfig?.confirmationPolicy,
           dataRoot: dataPath(''),
           pluginSourceDir: appPath('vendor', 'dsh-plugin'),
-          skillDirs: [APP_SKILLS_DIR, USER_SKILLS_DIR, LSF_SKILLS_DIR, path.join(APP_SKILLS_DIR, 'bio'), path.join(APP_SKILLS_DIR, 'hpc')],
+          skillDirs: [APP_SKILLS_DIR, USER_SKILLS_DIR, LSF_SKILLS_DIR, DONAU_SKILLS_DIR, path.join(APP_SKILLS_DIR, 'bio'), path.join(APP_SKILLS_DIR, 'hpc')],
           onJobsSubmitted: jobIds => {
             if (sessionId) jobWatcher.trackJobs(sessionId, jobIds);
           },
@@ -1970,6 +1976,7 @@ app.post('/api/ai/stream', async (req, res) => {
           agentSkillIndex = loadOrRefreshSkillIndex({
             skillsDir: APP_SKILLS_DIR,
             lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
             userSkillsDir: USER_SKILLS_DIR,
             indexPath: path.join(USER_SKILLS_DIR, '.skill-index.json'),
             clusterSkills,
@@ -2099,6 +2106,7 @@ app.post('/api/ai/stream', async (req, res) => {
         home: s.home,
         skillsDir: APP_SKILLS_DIR,
         lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
         userSkillsDir: USER_SKILLS_DIR,
         workspace: agentWorkspaces[0],
         workspaces: agentWorkspaces,
@@ -2255,6 +2263,7 @@ app.post('/api/ai/stream', async (req, res) => {
         steer: { take: () => steerQueue.take(aiRequestId) },
         skillsDir: APP_SKILLS_DIR,
         lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
         userSkillsDir: USER_SKILLS_DIR,
         runtimeConfig: req.body.agentConfig,
         resumePlan: req.body.resumePlan,
@@ -2848,6 +2857,7 @@ function launchQQBot(): boolean {
       },
       skillsDir: APP_SKILLS_DIR,
       lsfSkillDir: LSF_SKILLS_DIR,
+      donauSkillDir: DONAU_SKILLS_DIR,
       userSkillsDir: USER_SKILLS_DIR,
       trackJobs: (sid, jobIds) => jobWatcher.trackJobs(sid, jobIds),
       log: msg => console.log(msg),

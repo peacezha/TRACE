@@ -1,7 +1,7 @@
 {
   "name": "trace",
   "private": true,
-  "version": "0.5.6",
+  "version": "0.5.7",
   "productName": "TRACE",
   "type": "module",
   "main": "electron/main.cjs",
@@ -41,6 +41,7 @@
       "!skills/**/.skill-index.json",
       "!skills/**/__pycache__/**",
       "lsf_skills/**/*",
+      "donau_skills/**/*",
       "pipelines/**/*",
       "third-party/**/*",
       "!pipelines/**/__pycache__/**",

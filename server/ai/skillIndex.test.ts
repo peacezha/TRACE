@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { scoreSkill, searchSkillIndex } from './skillIndex';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { refreshSkillIndex, scoreSkill, searchSkillIndex } from './skillIndex';
 import type { SkillIndex, SkillMetadata } from './types';
 
 function makeSkill(overrides: Partial<SkillMetadata>): SkillMetadata {
@@ -58,5 +61,31 @@ describe('skillIndex 中文检索', () => {
   it('中英混合查询可命中', () => {
     const results = searchSkillIndex(index, '用 fastqc 做质控', 5);
     expect(results.map(r => r.filename)).toContain('bio/fastqc');
+  });
+});
+
+describe('donauSkillDir 技能包接入', () => {
+  it('加载 donau_skills 包进索引：source=donau，按系统技能处理', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'trace-donau-skills-'));
+    const skillsDir = path.join(root, 'skills');
+    const donauDir = path.join(root, 'donau_skills');
+    await fs.mkdir(path.join(donauDir, 'references'), { recursive: true });
+    await fs.mkdir(skillsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(donauDir, 'SKILL.md'),
+      '---\nname: hpc-donau\ndescription: 多瑙调度系统使用指南\n---\n\n# Donau\n\ndsub -s job.dsub\n',
+    );
+    await fs.writeFile(
+      path.join(donauDir, 'references', 'djob.md'),
+      '# djob\n\n状态：WAITING RUNNING SUCCEEDED FAILED\n',
+    );
+    const idx = refreshSkillIndex({ skillsDir, donauSkillDir: donauDir, indexPath: path.join(root, '.skill-index.json') });
+    const main = idx.skills.find(s => s.filename === 'donau-hpc');
+    expect(main).toMatchObject({ source: 'donau', isSystem: true, category: 'system', name: 'hpc-donau' });
+    const ref = idx.skills.find(s => s.filename === 'djob');
+    expect(ref).toMatchObject({ source: 'donau', isSystem: true, category: 'system' });
+    // 不提供 donauSkillDir 时索引不含 donau 技能
+    const without = refreshSkillIndex({ skillsDir, indexPath: path.join(root, '.skill-index.json') });
+    expect(without.skills.some(s => s.source === 'donau')).toBe(false);
   });
 });

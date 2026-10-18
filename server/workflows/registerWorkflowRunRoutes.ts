@@ -21,8 +21,8 @@ export interface WorkflowRunSession {
   exec: RunExec;
   home: string;
   sftp?: { fastPut: (localPath: string, remotePath: string, cb: (err?: Error) => void) => void };
-  /** 该集群登录探测到的调度器：步骤脚本的 #BSUB 指令按需翻译成 #SBATCH/#PBS */
-  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'none';
+  /** 该集群登录探测到的调度器：步骤脚本的 #BSUB 指令按需翻译成 #SBATCH/#PBS（donau 暂按剥除处理） */
+  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
 }
 
 export type WorkflowRunChanged = (sessionId: string, run: WorkflowRun) => void;

@@ -16,6 +16,7 @@ export interface SkillInstallOptions {
   /** Bundled read-only system skill directory. */
   skillsDir: string;
   lsfSkillDir?: string;
+  donauSkillDir?: string;
   /** Writable user-data skill directory. */
   userSkillsDir?: string;
   /** @deprecated compatibility alias for userSkillsDir. */
@@ -196,6 +197,7 @@ export async function installSkillFromSource(
     const index = refreshSkillIndex({
       skillsDir: options.skillsDir,
       lsfSkillDir: options.lsfSkillDir,
+      donauSkillDir: options.donauSkillDir,
       userSkillsDir: writableRoot,
       indexPath: path.join(writableRoot, '.skill-index.json'),
     });

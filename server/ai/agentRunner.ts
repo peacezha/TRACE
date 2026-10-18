@@ -356,6 +356,7 @@ export interface AgentCtx {
   profile: AIProfile;
   skillsDir?: string;
   lsfSkillDir?: string;
+  donauSkillDir?: string;
   userSkillsDir?: string;
   /** 当前集群用户家目录：工作流结构化状态工具做路径边界校验。 */
   home?: string;
@@ -641,6 +642,11 @@ async function reconcileWorkflowWaitingJobs(ctx: AgentCtx, run: any): Promise<an
     if (scheduler === 'pbs') {
       const m = state.match(/Exit_status\s*=\s*(\d+)/i) || state.match(/job_state\s*=\s*([A-Z])/i);
       if (m && /Exit_status/i.test(m[0])) mapped = m[1] === '0' ? 'DONE' : 'EXIT';
+    } else if (scheduler === 'donau') {
+      // djob -l 是多行详情，不能取首 token：全文搜终态关键词；空输出=作业已查不到（GONE）
+      const m = state.match(/\b(SUCCEEDED|FAILED|SSTOPPED|STOPPED)\b/i);
+      if (m) mapped = m[1].toUpperCase() === 'SUCCEEDED' ? 'DONE' : 'EXIT';
+      else if (!state) mapped = 'GONE';
     } else {
       const token = (state.split(/\s+/)[0] || '').toUpperCase();
       if (!token) mapped = 'GONE';        // 滚出历史列表：极可能早已结束，产物由执行器核实
@@ -693,6 +699,8 @@ async function reviveFailedRunWithLiveJobs(ctx: AgentCtx, run: any): Promise<any
     } catch { /* 查询失败按非存活处理 */ }
     if (scheduler === 'pbs') {
       if (/job_state\s*=\s*[QRHWE]/i.test(state)) hasLive = true;
+    } else if (scheduler === 'donau') {
+      if (/\b(WAITING|PENDING|RUNNING)\b/i.test(state)) hasLive = true;
     } else {
       const token = (state.split(/\s+/)[0] || '').toUpperCase();
       if (ACTIVE.test(token)) hasLive = true;
@@ -887,10 +895,11 @@ export async function runAgent(
   const restoredPlan = planState.restore(ctx.resumePlan);
   const skillsDir = ctx.skillsDir || appPath('skills');
   const lsfSkillDir = ctx.lsfSkillDir || appPath('lsf_skills');
+  const donauSkillDir = ctx.donauSkillDir || appPath('donau_skills');
   const userSkillsDir = ctx.userSkillsDir || dataPath('skills');
   // 移植自 dsh 的脚本型工具：按技能目录约定相对路径探测（同 dshSidecar resolveScript）。
   const resolveHelperScript = (relative: string): string | undefined => {
-    for (const dir of [skillsDir, userSkillsDir, lsfSkillDir]) {
+    for (const dir of [skillsDir, userSkillsDir, lsfSkillDir, donauSkillDir]) {
       const candidate = path.join(dir, ...relative.split('/'));
       if (fs.existsSync(candidate)) return candidate;
     }
@@ -1499,7 +1508,7 @@ export async function runAgent(
               // AI 关键路径只读内存缓存。远程技能刷新由技能库页面显式触发，
               // 这里绝不为了回答问题扫描集群文件。
               const clusterSkills = getCachedClusterSkills(ctx.sid);
-              const index = loadOrRefreshSkillIndex({ skillsDir, lsfSkillDir, userSkillsDir, indexPath: path.join(userSkillsDir, '.skill-index.json'), clusterSkills });
+              const index = loadOrRefreshSkillIndex({ skillsDir, lsfSkillDir, donauSkillDir, userSkillsDir, indexPath: path.join(userSkillsDir, '.skill-index.json'), clusterSkills });
               const matches = searchSkillIndex(index, query, 8);
               if (matches.length === 0) {
                 const msg = `No skills found for "${query}".`;
@@ -1508,7 +1517,7 @@ export async function runAgent(
               }
               const results = matches.map(m => {
                 const ex = (m.excerpt || m.content || "").slice(0, 1500);
-                const trust = m.source === 'system' || m.source === 'lsf' ? '[TRUSTED POLICY]' : '[REFERENCE ONLY]';
+                const trust = m.source === 'system' || m.source === 'lsf' || m.source === 'donau' ? '[TRUSTED POLICY]' : '[REFERENCE ONLY]';
                 return `- ${trust} **${m.name || m.filename}** (${m.source}): ${m.description || ''}\n  \`\`\`\n${ex}\n  \`\`\``;
               }).join('\n\n');
               cb.onToolResult('search_skills', 'Found ' + matches.length + ' skills');
@@ -1834,7 +1843,7 @@ export async function runAgent(
             cb.onToolCall('wheatomics_query', input);
             const script = resolveHelperScript('wheatomics-query/scripts/wheatomics.py');
             if (!script) {
-              const msg = `wheatomics_query 不可用：未找到 wheatomics-query/scripts/wheatomics.py（已搜索技能目录 ${[skillsDir, userSkillsDir, lsfSkillDir].join(', ')}）。`;
+              const msg = `wheatomics_query 不可用：未找到 wheatomics-query/scripts/wheatomics.py（已搜索技能目录 ${[skillsDir, userSkillsDir, lsfSkillDir, donauSkillDir].join(', ')}）。`;
               cb.onToolResult('wheatomics_query', msg);
               return msg;
             }
@@ -1867,7 +1876,7 @@ export async function runAgent(
             cb.onToolCall('github_mirror_scout', input);
             const script = resolveHelperScript('github-mirror/scripts/mirror-scout.py');
             if (!script) {
-              const msg = `github_mirror_scout 不可用：未找到 github-mirror/scripts/mirror-scout.py（已搜索技能目录 ${[skillsDir, userSkillsDir, lsfSkillDir].join(', ')}）。`;
+              const msg = `github_mirror_scout 不可用：未找到 github-mirror/scripts/mirror-scout.py（已搜索技能目录 ${[skillsDir, userSkillsDir, lsfSkillDir, donauSkillDir].join(', ')}）。`;
               cb.onToolResult('github_mirror_scout', msg);
               return msg;
             }
@@ -1905,7 +1914,7 @@ export async function runAgent(
               }
               const result = await installSkillFromSource(
                 { type: 'local' as const, filename, content },
-                { skillsDir, lsfSkillDir, userSkillsDir },
+                { skillsDir, lsfSkillDir, donauSkillDir, userSkillsDir },
               );
               const msg = result
                 ? `Skill "${filename}" saved.`

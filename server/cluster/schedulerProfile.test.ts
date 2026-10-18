@@ -24,6 +24,10 @@ describe('schedulerProfile（账号级调度器标签）', () => {
     expect(parseSchedulerProbe('SCHED:SLURM\nMODULE:NO').kind).toBe('slurm');
     expect(parseSchedulerProbe('SCHED:SLURM\nMODULE:NO').hasModule).toBe(false);
     expect(parseSchedulerProbe('SCHED:PBS\nMODULE:YES')).toMatchObject({ kind: 'pbs', hasModule: true });
+    expect(parseSchedulerProbe('SCHED:DONAU\nMODULE:YES')).toMatchObject({ kind: 'donau', hasModule: true });
+    // 多套命令共存时按探测优先级取值：LSF > Slurm > PBS > Donau
+    expect(parseSchedulerProbe('SCHED:LSF\nSCHED:DONAU').kind).toBe('lsf');
+    expect(parseSchedulerProbe('SCHED:PBS\nSCHED:DONAU').kind).toBe('pbs');
     expect(parseSchedulerProbe('SCHED:NONE\nMODULE:NO\nPKG:pip3')).toEqual({ kind: 'none', hasModule: false, installers: ['pip3'] });
     expect(parseSchedulerProbe('').kind).toBe('none');
   });
@@ -114,5 +118,41 @@ describe('scheduler command maps（LSF/Slurm/PBS/none）', () => {
     const { translateSchedulerDirectives } = await import('../notifications/scheduler');
     const script = '#!/bin/bash\n#BSUB -J x\necho hi\n';
     expect(translateSchedulerDirectives(script, 'lsf')).toBe(script);
+  });
+});
+
+describe('Donau（多瑙）探测与 prompt 注入', () => {
+  it('normalizeSchedulerKind 放行 donau，SCHEDULER_LABELS 含 Donau', async () => {
+    const { normalizeSchedulerKind, SCHEDULER_LABELS } = await freshModule();
+    expect(normalizeSchedulerKind('donau')).toBe('donau');
+    expect(normalizeSchedulerKind('donau2')).toBeNull();
+    expect(SCHEDULER_LABELS.donau).toBe('Donau');
+  });
+
+  it('中文 prompt 段落包含 dsub/djob/dkill 与 -aa 规则', async () => {
+    const { buildSchedulerPromptSection } = await freshModule();
+    const zh = buildSchedulerPromptSection('donau', 'zh-CN');
+    expect(zh).toContain('多瑙');
+    expect(zh).toContain('dsub -s');
+    expect(zh).toContain('#DSUB');
+    expect(zh).toContain('-aa');
+    expect(zh).toContain("-R 'cpu=N'");
+    expect(zh).toContain('djob -l');
+    expect(zh).toContain('dkill');
+    expect(zh).toContain('dqueue');
+    expect(zh).toContain('search_skills');
+  });
+
+  it('英文 prompt 段落同样包含关键命令与 -aa 规则', async () => {
+    const { buildSchedulerPromptSection } = await freshModule();
+    const en = buildSchedulerPromptSection('donau', 'en-US');
+    expect(en).toContain('Donau');
+    expect(en).toContain('dsub -s');
+    expect(en).toContain('#DSUB');
+    expect(en).toContain('-aa');
+    expect(en).toContain('djob -l');
+    expect(en).toContain('dkill');
+    expect(en).toContain('dqueue');
+    expect(en).toContain('search_skills');
   });
 });

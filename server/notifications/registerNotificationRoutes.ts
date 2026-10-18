@@ -209,8 +209,8 @@ export function registerNotificationRoutes(
   app.put('/api/jobs/scheduler', async (req, res) => {
     try {
       const scheduler = req.body?.scheduler;
-      if (scheduler !== 'lsf' && scheduler !== 'slurm') {
-        sendError(res, 400, 'scheduler 必须是 lsf 或 slurm');
+      if (!['lsf', 'slurm', 'pbs', 'donau', 'none'].includes(scheduler)) {
+        sendError(res, 400, 'scheduler 必须是 lsf/slurm/pbs/donau/none 之一');
         return;
       }
       await saveSchedulerType(scheduler as SchedulerType);

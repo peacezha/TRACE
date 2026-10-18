@@ -29,6 +29,7 @@ export interface QQBotDeps {
   }) => Promise<void>;
   skillsDir: string;
   lsfSkillDir: string;
+  donauSkillDir?: string;
   userSkillsDir: string;
   /** Agent 提交作业后交给服务端 jobWatcher 跟踪（只监控不绑定不唤醒，防短作业漏检）。 */
   trackJobs?: (sid: string, jobIds: string[]) => void;
@@ -313,6 +314,7 @@ export class QQBot {
       run: async (_sid, cmd, to) => session.exec(cmd, to),
       skillsDir: this.deps.skillsDir,
       lsfSkillDir: this.deps.lsfSkillDir,
+      donauSkillDir: this.deps.donauSkillDir,
       userSkillsDir: this.deps.userSkillsDir,
       // QQ 对话没有可回写的 TRACE 会话：只跟踪作业完成情况（通知/事件），不登记绑定不唤醒。
       onJobsSubmitted: jobIds => this.deps.trackJobs?.(session.sid, jobIds),

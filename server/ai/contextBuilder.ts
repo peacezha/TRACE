@@ -57,7 +57,7 @@ function clipByTokens(text: string, maxTokens: number): string {
 
 function formatSkillPack(pack: SkillKnowledgePack): string {
   const parts: string[] = [];
-  const label = (source?: string) => source === 'system' || source === 'lsf'
+  const label = (source?: string) => source === 'system' || source === 'lsf' || source === 'donau'
     ? '[TRUSTED POLICY]'
     : '[REFERENCE ONLY]';
 
@@ -105,11 +105,12 @@ export async function buildSmartContext(input: SmartContextInput): Promise<AIMes
   // 2. Build skill knowledge pack
   const skillsDir = appPath('skills');
   const lsfSkillDir = appPath('lsf_skills');
+  const donauSkillDir = appPath('donau_skills');
   const userSkillsDir = dataPath('skills');
   let skillPack: SkillKnowledgePack = { core: null, dependencies: [], related: [], bible: [], totalTokens: 0 };
   const index = input.skipSkills
     ? undefined
-    : input.skillIndex ?? loadOrRefreshSkillIndex({ skillsDir, lsfSkillDir, userSkillsDir, indexPath: path.join(userSkillsDir, '.skill-index.json') });
+    : input.skillIndex ?? loadOrRefreshSkillIndex({ skillsDir, lsfSkillDir, donauSkillDir, userSkillsDir, indexPath: path.join(userSkillsDir, '.skill-index.json') });
 
   // Collect hints from cluster and plan
   const clusterHints: string[] = [];

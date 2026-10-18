@@ -1,11 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { classifyCommandRisk, isCatastrophicCommand, isDangerousCommand } from './commandSafety';
+import { classifyCommandRisk, isCatastrophicCommand, isDangerousCommand, isJobTerminationCommand } from './commandSafety';
 
 describe('isDangerousCommand', () => {
   it('flags job killing and process killing', () => {
     expect(isDangerousCommand('bkill 12345')).toBe(true);
+    expect(isDangerousCommand('dkill 12345')).toBe(true);
     expect(isDangerousCommand('kill -9 1234')).toBe(true);
     expect(isDangerousCommand('pkill -u user')).toBe(true);
+  });
+
+  it('Donau 作业终止/控制命令（dkill/djctl）一律需要用户确认', () => {
+    expect(isJobTerminationCommand('dkill 12345')).toBe(true);
+    expect(isJobTerminationCommand('dkill --force 12345')).toBe(true);
+    expect(isJobTerminationCommand('djctl stop 12345')).toBe(true);
+    expect(isJobTerminationCommand('djctl resume 12345')).toBe(true);
+    // 与 LSF/Slurm/PBS 对齐：终止作业不是机器级破坏（catastrophic 名单不含它们）
+    expect(isCatastrophicCommand('dkill 12345')).toBe(false);
+    // 查询类命令不受影响
+    expect(isJobTerminationCommand('djob -l 12345')).toBe(false);
+    expect(isDangerousCommand('djob')).toBe(false);
+    expect(isDangerousCommand('dqueue')).toBe(false);
+  });
+
+  it('Donau 命令分类：dsub 记为作业操作，查询命令只读', () => {
+    expect(classifyCommandRisk('dsub -s run.dsub')).toBe('job');
+    expect(classifyCommandRisk('djob')).toBe('read');
+    expect(classifyCommandRisk('dqueue')).toBe('read');
+    expect(classifyCommandRisk('dnode')).toBe('read');
+    expect(classifyCommandRisk('djob -ll 123 | head -40')).toBe('read');
   });
 
   it('flags destructive disk and permission operations', () => {

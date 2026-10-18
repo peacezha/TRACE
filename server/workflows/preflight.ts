@@ -175,6 +175,7 @@ const SCHED_DETECT =
   'if command -v bsub >/dev/null 2>&1; then echo "SCHED|lsf"; ' +
   'elif command -v sbatch >/dev/null 2>&1; then echo "SCHED|slurm"; ' +
   'elif command -v qsub >/dev/null 2>&1; then echo "SCHED|pbs"; ' +
+  'elif command -v dsub >/dev/null 2>&1; then echo "SCHED|donau"; ' +
   'else echo "SCHED|none"; fi';
 
 interface ParsedChecks {
@@ -196,7 +197,7 @@ function parseItemLines(raw: string, manifest: FlowManifest): ParsedChecks {
       continue;
     }
     if (cols[0] === 'SCHED' && cols[1]) {
-      out.scheduler = (['lsf', 'slurm', 'pbs', 'none'].includes(cols[1]) ? cols[1] : 'unknown') as PreflightResult['scheduler'];
+      out.scheduler = (['lsf', 'slurm', 'pbs', 'donau', 'none'].includes(cols[1]) ? cols[1] : 'unknown') as PreflightResult['scheduler'];
       continue;
     }
     if (cols[0] !== 'ITEM' || cols.length < 4) continue;

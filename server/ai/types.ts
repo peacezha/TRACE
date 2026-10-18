@@ -35,7 +35,7 @@ export interface SkillMetadata {
   excerpt: string;
   size: number;
   isSystem: boolean;
-  source: 'system' | 'imported' | 'user' | 'lsf' | 'cluster';
+  source: 'system' | 'imported' | 'user' | 'lsf' | 'donau' | 'cluster';
   sourcePath: string;
   score?: number;
   // New: skill relation fields from frontmatter

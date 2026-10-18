@@ -26,6 +26,7 @@ export interface LegacyResumeDeps {
   loadProfile: () => AIProfile | undefined;
   skillsDir?: string;
   lsfSkillDir?: string;
+  donauSkillDir?: string;
   userSkillsDir?: string;
   appendConversation?: (conversationId: string, messages: AIMessage[], sshSessionId?: string) => Promise<boolean>;
   loadConversation?: (conversationId: string, sshSessionId: string) => Promise<{ messages: AIMessage[]; summary?: string } | null>;
@@ -124,6 +125,7 @@ async function runResume(evt: LegacyResumeJobEvent, binding: JobAgentBinding, de
       home: session.home,
       skillsDir: deps.skillsDir,
       lsfSkillDir: deps.lsfSkillDir,
+      donauSkillDir: deps.donauSkillDir,
       userSkillsDir: deps.userSkillsDir,
       runtimeConfig: {
         planningPolicy: 'auto',

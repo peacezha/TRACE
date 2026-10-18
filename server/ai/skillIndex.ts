@@ -6,6 +6,8 @@ import type { SkillIndex, SkillMetadata } from './types';
 export interface SkillIndexOptions {
   skillsDir: string;
   lsfSkillDir?: string;
+  /** Bundled Donau (多瑙) scheduler skill pack directory (SKILL.md + references/). */
+  donauSkillDir?: string;
   /** Optional writable directory for user-installed skills, scanned in addition to skillsDir. */
   userSkillsDir?: string;
   indexPath?: string;
@@ -63,7 +65,7 @@ function toPosixPath(value: string): string {
 }
 
 function categoryFor(relativePath: string, source: SkillMetadata['source']): string {
-  if (source === 'lsf') return 'system';
+  if (source === 'lsf' || source === 'donau') return 'system';
   if (source === 'cluster') return 'cluster';
   if (relativePath.startsWith('bio/')) return 'bio';
   if (relativePath.startsWith('nature/') || relativePath.includes('nature-')) return 'nature';
@@ -110,7 +112,7 @@ function skillFromFile(filePath: string, relativePath: string, source: SkillMeta
       content: raw,
       excerpt: cleanExcerpt(parsed.content),
       size: Buffer.byteLength(raw),
-      isSystem: source === 'system' || source === 'lsf',
+      isSystem: source === 'system' || source === 'lsf' || source === 'donau',
       source,
       sourcePath: filePath,
       dependsOn: Array.isArray(parsed.data.depends_on) ? parsed.data.depends_on.map(String) : undefined,
@@ -152,6 +154,18 @@ export function refreshSkillIndex(options: SkillIndexOptions): SkillIndex {
         const item = skillFromFile(fullPath, toPosixPath(entry.name), 'user');
         if (item) skills.push(item);
       }
+    }
+  }
+
+  if (options.donauSkillDir && fs.existsSync(options.donauSkillDir)) {
+    const skillPath = path.join(options.donauSkillDir, 'SKILL.md');
+    if (fs.existsSync(skillPath)) {
+      const item = skillFromFile(skillPath, 'donau-hpc.md', 'donau');
+      if (item) skills.push({ ...item, filename: 'donau-hpc' });
+    }
+    const refs = path.join(options.donauSkillDir, 'references');
+    if (fs.existsSync(refs)) {
+      collectSkillFiles(refs, refs, 'donau', skills);
     }
   }
 
@@ -230,6 +244,7 @@ export function loadOrRefreshSkillIndex(options: SkillIndexOptions): SkillIndex 
       const freshest = Math.max(
         newestMtimeMs(options.skillsDir),
         options.lsfSkillDir ? newestMtimeMs(options.lsfSkillDir) : 0,
+        options.donauSkillDir ? newestMtimeMs(options.donauSkillDir) : 0,
         options.userSkillsDir ? newestMtimeMs(options.userSkillsDir) : 0,
       );
       if (freshest <= cacheMtime) {

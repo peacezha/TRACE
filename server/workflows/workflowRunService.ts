@@ -35,8 +35,8 @@ export function resolveAssetLocalPath(source: string): string {
 /** createWorkflowRun 的可选部署上下文：有 sftp 时把 workflow.assets 上传进 RUN 目录。 */
 export interface CreateRunDeployContext {
   sftp?: { fastPut: (localPath: string, remotePath: string, cb: (err?: Error) => void) => void } | undefined;
-  /** 目标集群调度器：非 LSF 时步骤脚本里的 #BSUB 指令会被翻译（#SBATCH/#PBS/剥除）。 */
-  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'none';
+  /** 目标集群调度器：非 LSF 时步骤脚本里的 #BSUB 指令会被翻译（#SBATCH/#PBS/剥除；donau 暂按剥除处理）。 */
+  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
 }
 
 const RUN_STATUSES = new Set<WorkflowRunStatus>([
@@ -182,7 +182,7 @@ export function buildWorkflowStepScript(
   config: WorkflowRunConfig,
   stepNumber: number,
   runDir: string,
-  scheduler: 'lsf' | 'slurm' | 'pbs' | 'none' = 'lsf',
+  scheduler: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' = 'lsf',
 ): string {
   const step = workflow.steps[stepNumber - 1];
   if (!step) throw new Error(`步骤不存在: ${stepNumber}`);

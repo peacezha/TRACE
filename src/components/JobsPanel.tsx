@@ -33,12 +33,20 @@ interface ProcessEntry {
   command: string;
 }
 
-type SchedulerType = 'lsf' | 'slurm';
+type SchedulerType = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
 
 const SCHEDULER_LABELS: Record<SchedulerType, string> = {
   lsf: 'LSF',
   slurm: 'Slurm',
+  pbs: 'PBS',
+  donau: 'Donau',
+  none: '无调度器',
 };
+
+/** 后端探测值放宽到五类;未知值按 lsf 展示(老版本默认)。 */
+function normalizeSchedulerType(value: unknown): SchedulerType {
+  return value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' ? value : 'lsf';
+}
 
 interface NotifyConfig {
   enabled: boolean;
@@ -134,7 +142,7 @@ export default function JobsPanel({ isOpen, onClose, sessionId }: JobsPanelProps
       } else setError(jobsRes.data?.error || '获取作业失败');
       if (eventsRes.ok) setEvents(eventsRes.data.events || []);
       if (configRes.ok) setConfig(configRes.data.config);
-      if (schedulerRes.ok) setScheduler(schedulerRes.data.scheduler === 'slurm' ? 'slurm' : 'lsf');
+      if (schedulerRes.ok) setScheduler(normalizeSchedulerType(schedulerRes.data.scheduler));
     } catch (e: any) {
       setError(e.message || '网络错误');
     } finally {

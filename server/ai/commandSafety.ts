@@ -2,7 +2,7 @@
 // 高风险操作统一进入确认流程；默认模式不再把普通写入、作业提交或联网操作都交给用户手工执行。
 
 const DANGEROUS_PATTERNS: RegExp[] = [
-  /\b(bkill|scancel|qdel)\b/, // Terminate LSF / Slurm / PBS jobs.
+  /\b(bkill|scancel|qdel|dkill)\b/, // Terminate LSF / Slurm / PBS / Donau jobs.
   /\bkill\s+-9\b/,
   /\bpkill\b/,
   /\bkillall\b/,
@@ -34,6 +34,7 @@ const READ_ONLY_COMMANDS = new Set([
   'fgrep', 'awk', 'cut', 'sort', 'uniq', 'tr', 'paste', 'column', 'realpath',
   'readlink', 'md5sum', 'sha1sum', 'sha256sum', 'diff', 'cmp', 'comm', 'test', '[',
   'echo', 'printf', 'sed', 'cd', 'export', 'true', 'false',
+  'djob', 'dqueue', 'dnode', 'dpeek', 'dacct', 'duser', 'dcluster', 'drespool',
 ]);
 
 const WRITE_COMMANDS = new Set([
@@ -41,7 +42,7 @@ const WRITE_COMMANDS = new Set([
   'perl', 'python', 'python3', 'rscript', 'tar', 'gzip', 'gunzip', 'bgzip',
 ]);
 
-const JOB_COMMANDS = new Set(['bsub', 'bmod', 'bstop', 'bresume', 'brequeue']);
+const JOB_COMMANDS = new Set(['bsub', 'bmod', 'bstop', 'bresume', 'brequeue', 'dsub', 'djctl', 'dmod']);
 const NETWORK_COMMANDS = new Set(['curl', 'wget', 'scp', 'sftp', 'rsync', 'ssh', 'git']);
 
 function commandWords(command: string): string[] {
@@ -67,7 +68,7 @@ export function isCatastrophicCommand(command: string): boolean {
 
 /** Job termination always requires an exact, one-shot user decision. */
 export function isJobTerminationCommand(command: string): boolean {
-  return /\b(?:bkill|scancel|qdel)\b/i.test(command);
+  return /\b(?:bkill|scancel|qdel|dkill|djctl)\b/i.test(command);
 }
 
 /**

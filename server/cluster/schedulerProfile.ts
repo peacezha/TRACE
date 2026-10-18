@@ -1,16 +1,17 @@
-// 调度器画像：登录后探测一次集群的作业调度系统（LSF/Slurm/PBS/无），
+// 调度器画像：登录后探测一次集群的作业调度系统（LSF/Slurm/PBS/Donau/无），
 // 按账号（username@host:port）持久化打标签，之后不再重复探测。
 // 不同调度器的命令/流程逻辑差异由 notifications/scheduler.ts 的命令映射承接。
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
 
-export type SchedulerKind = 'lsf' | 'slurm' | 'pbs' | 'none';
+export type SchedulerKind = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
 
 export const SCHEDULER_LABELS: Record<SchedulerKind, string> = {
   lsf: 'LSF',
   slurm: 'Slurm',
   pbs: 'PBS',
+  donau: 'Donau',
   none: '无调度器',
 };
 
@@ -31,7 +32,7 @@ export function schedulerTagKey(info: { username: string; host: string; port?: s
 }
 
 export function normalizeSchedulerKind(value: unknown): SchedulerKind | null {
-  return value === 'lsf' || value === 'slurm' || value === 'pbs' || value === 'none' ? value : null;
+  return value === 'lsf' || value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' ? value : null;
 }
 
 export async function loadSchedulerTag(key: string): Promise<SchedulerTag | null> {
@@ -61,13 +62,14 @@ export async function saveSchedulerTag(key: string, tag: Omit<SchedulerTag, 'det
   return saved;
 }
 
-// 探测命令：一次 SSH 调用完成。调度器优先级 LSF > Slurm > PBS（同一登录节点多套
+// 探测命令：一次 SSH 调用完成。调度器优先级 LSF > Slurm > PBS > Donau（同一登录节点多套
 // 命令共存极少见；真共存时以 LSF 为准——它通常是主调度）。同时探测 module 系统
 //（含 profile.d 初始化兜底）与直装包管理器。
 export const SCHEDULER_PROBE_COMMAND = [
   'if command -v bjobs >/dev/null 2>&1 && command -v bsub >/dev/null 2>&1; then echo SCHED:LSF',
   'elif command -v squeue >/dev/null 2>&1 && command -v sbatch >/dev/null 2>&1; then echo SCHED:SLURM',
   'elif command -v qstat >/dev/null 2>&1 && command -v qsub >/dev/null 2>&1; then echo SCHED:PBS',
+  'elif command -v djob >/dev/null 2>&1 && command -v dsub >/dev/null 2>&1; then echo SCHED:DONAU',
   'else echo SCHED:NONE; fi',
   'if ! type module >/dev/null 2>&1; then for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/Modules/init/bash /usr/share/lmod/lmod/init/bash; do [ -r "$f" ] && . "$f" >/dev/null 2>&1 && type module >/dev/null 2>&1 && break || true; done; fi',
   'if type module >/dev/null 2>&1; then echo MODULE:YES; else echo MODULE:NO; fi',
@@ -87,6 +89,7 @@ export function parseSchedulerProbe(output: string): EnvProbeResult {
   if (/sched:lsf/.test(text)) kind = 'lsf';
   else if (/sched:slurm/.test(text)) kind = 'slurm';
   else if (/sched:pbs/.test(text)) kind = 'pbs';
+  else if (/sched:donau/.test(text)) kind = 'donau';
   const hasModule = /module:yes/.test(text);
   const installers = [...text.matchAll(/pkg:(mamba|conda|uv|pip3)/g)].map(m => m[1]);
   return { kind, hasModule, installers: [...new Set(installers)] };
@@ -142,6 +145,11 @@ export function buildSchedulerPromptSection(
       section = en
         ? '\n- SCHEDULER: this cluster uses PBS/Torque. Submit jobs with `qsub script.sh` (never bsub), monitor with `qstat -u $(whoami)`, cancel with `qdel`. Script directives are `#PBS`.'
         : '\n- 调度器：本集群是 PBS/Torque。提交作业用 `qsub script.sh`（不是 bsub），查看用 `qstat -u $(whoami)`，取消用 `qdel`。脚本指令写作 `#PBS`。';
+      break;
+    case 'donau':
+      section = en
+        ? "\n- SCHEDULER: this cluster uses the Donau (多瑙) scheduler. Submit jobs with `dsub -s script.dsub` (the script must be chmod +x first; directives are written as `#DSUB`; `-q <queue>` MUST be paired with `-aa`, otherwise the job never gets scheduled to a compute node; request cores with `-R 'cpu=N'`, NPU/GPU with `-R 'npu=N'`/`-R 'gpu=N'`). Monitor with `djob` / `djob <id>`; check queueing/failure reasons and confirm final states with `djob -l <id>`; cancel with `dkill <id>`; list queues with `dqueue`. A complete hpc-donau guide is available in the skill library — run search_skills before writing job scripts."
+        : "\n- 调度器：本集群是多瑙（Donau）调度系统。提交作业用 `dsub -s script.dsub`（脚本必须先 chmod +x；指令写作 `#DSUB`；`-q <队列>` 必须和 `-aa` 一起用，缺了 -aa 作业调度不到计算节点；核数用 `-R 'cpu=N'`，NPU/GPU 用 `-R 'npu=N'`/`-R 'gpu=N'`）。查看作业用 `djob` 或 `djob <id>`，排队/失败原因与终态确认用 `djob -l <id>`，取消作业用 `dkill <id>`，查看队列用 `dqueue`。技能库里有完整的 hpc-donau 使用规范，写作业脚本前先用 search_skills 查询。";
       break;
     case 'none':
       section = en

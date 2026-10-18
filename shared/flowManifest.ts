@@ -73,7 +73,7 @@ export interface PreflightResult {
   /** 流程资源清单指纹，防止流程修改后误用旧缓存。 */
   manifestHash?: string;
   checkedAt: number;
-  scheduler: 'lsf' | 'slurm' | 'pbs' | 'none' | 'unknown';
+  scheduler: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
   /** 非交互 SSH 中 Module/Lmod 是否已成功初始化。旧缓存可能没有此字段。 */
   moduleSystem?: 'ready' | 'unavailable' | 'unknown';
   moduleSystemDetail?: string;

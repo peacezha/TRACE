@@ -1,11 +1,12 @@
-// 作业监控器：按会话标签的调度器（LSF bjobs / Slurm squeue / PBS qstat / 无）轮询，检测作业完成（DONE/EXIT/消失），产生事件并触发通知。
+// 作业监控器：按会话标签的调度器（LSF bjobs / Slurm squeue / PBS qstat / Donau djob / 无）轮询，检测作业完成（DONE/EXIT/消失），产生事件并触发通知。
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
 import {
   loadSchedulerType, jobsCommand, parseJobsOutput, lsfFinalStateCommand, slurmFinalStateCommand,
   pbsFinalStateCommand, lsfOutputTailCommand, slurmOutputTailCommand, lsfJobsByIdsCommand,
-  parseLsfJobsByIdsOutput, type SchedulerType,
+  parseLsfJobsByIdsOutput, donauJobsByIdsCommand, parseDonauJobsByIdsOutput,
+  donauFinalStateCommand, parseDjobFinalState, donauOutputTailCommand, type SchedulerType,
 } from './scheduler';
 import type { JobEntry } from '../ai/types';
 import { loadNotifyConfig, sendNotification, type NotifyConfig } from './notifyService';
@@ -209,6 +210,16 @@ export class JobWatcher {
     }
   }
 
+  /** Donau 作业从 djob 列表消失后用 djob -l 补查：SUCCEEDED→DONE，FAILED/STOPPED/SSTOPPED→EXIT；查不到或仍活跃留待下轮。 */
+  private async resolveDonauFinalStatus(session: WatchSessionLike, jobId: string): Promise<'DONE' | 'EXIT' | undefined> {
+    try {
+      const raw = await session.cluster.exec(donauFinalStateCommand(jobId), FINAL_STATE_EXEC_TIMEOUT_MS);
+      return parseDjobFinalState(raw);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async poll(sessionId: string, session: WatchSessionLike): Promise<void> {
     if (this.polling.has(sessionId)) return;
     this.polling.add(sessionId);
@@ -224,21 +235,25 @@ export class JobWatcher {
     const scheduler = session.scheduler ?? await loadSchedulerType();
     const prev = this.prevJobs.get(sessionId);
     let jobs: JobEntry[];
-    // 大 LSF 集群减负：已有监控基线且仍有未终态作业时，按 ID 定点查询（一条命令查全部），
-    // 不再每轮全量 bjobs -w；定点结果里查不到 ID 等同消失，仍走既有终态补查逻辑。
+    // 大 LSF/Donau 集群减负：已有监控基线且仍有未终态作业时，按 ID 定点查询（一条命令查全部），
+    // 不再每轮全量 bjobs -w/djob；定点结果里查不到 ID 等同消失，仍走既有终态补查逻辑。
     // 没有未终态作业可看护时回退全量快照，保住手动提交作业的完成通知与首轮基线。
-    const watchIds = scheduler === 'lsf'
+    const watchIds = scheduler === 'lsf' || scheduler === 'donau'
       ? (prev ?? []).filter(j => j.status !== 'DONE' && j.status !== 'EXIT').map(j => j.jobId)
       : [];
     if (watchIds.length > 0) {
       let raw: string;
       try {
-        raw = await session.cluster.exec(lsfJobsByIdsCommand(watchIds), POLL_EXEC_TIMEOUT_MS);
+        raw = await session.cluster.exec(
+          scheduler === 'donau' ? donauJobsByIdsCommand(watchIds) : lsfJobsByIdsCommand(watchIds),
+          POLL_EXEC_TIMEOUT_MS,
+        );
       } catch {
         return; // 采集失败跳过本轮
       }
       const prevById = new Map((prev ?? []).map(j => [j.jobId, j]));
-      jobs = parseLsfJobsByIdsOutput(raw).map(entry => {
+      const byIds = scheduler === 'donau' ? parseDonauJobsByIdsOutput(raw) : parseLsfJobsByIdsOutput(raw);
+      jobs = byIds.map(entry => {
         const known = prevById.get(entry.jobId);
         return {
           jobId: entry.jobId,
@@ -290,6 +305,8 @@ export class JobWatcher {
         finalStatus = await this.resolveSlurmFinalStatus(session, job.jobId);
       } else if (scheduler === 'pbs') {
         finalStatus = await this.resolvePbsFinalStatus(session, job.jobId);
+      } else if (scheduler === 'donau') {
+        finalStatus = await this.resolveDonauFinalStatus(session, job.jobId);
       } else if (scheduler === 'none') {
         finalStatus = 'DONE'; // 无调度器：进程消失即结束，成败由后续验证产物判定
       } else {
@@ -312,12 +329,14 @@ export class JobWatcher {
     }
   }
 
-  /** 作业输出尾部摘要：bpeek/slurm-out 读取失败或无输出时留空，不阻塞事件。 */
+  /** 作业输出尾部摘要：bpeek/slurm-out/dpeek 读取失败或无输出时留空，不阻塞事件。 */
   private async fetchOutputExcerpt(session: WatchSessionLike, scheduler: SchedulerType, jobId: string): Promise<string | undefined> {
     // PBS 无 bpeek 等价物（输出直接落工作目录文件）；无调度器时没有作业输出概念
     if (scheduler === 'pbs' || scheduler === 'none') return undefined;
     try {
-      const command = scheduler === 'slurm' ? slurmOutputTailCommand(jobId) : lsfOutputTailCommand(jobId);
+      const command = scheduler === 'slurm'
+        ? slurmOutputTailCommand(jobId)
+        : scheduler === 'donau' ? donauOutputTailCommand(jobId) : lsfOutputTailCommand(jobId);
       const raw = (await session.cluster.exec(command, 10_000)).trim();
       if (!raw) return undefined;
       return raw.length > EXCERPT_MAX_CHARS ? raw.slice(-EXCERPT_MAX_CHARS) : raw;
