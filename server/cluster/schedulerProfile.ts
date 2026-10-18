@@ -22,7 +22,13 @@ export interface SchedulerTag {
   hasModule?: boolean;
   /** 探测到的直装包管理器（mamba/conda/uv/pip3），供 AI 选最快的安装路径 */
   installers?: string[];
+  /** 生成该标签的探测逻辑版本；与当前版本不一致时下次登录自动重探(见 resolveAccountScheduler)。 */
+  probeVersion?: number;
 }
+
+/** 探测逻辑版本:探测命令/判定规则变化时 +1,旧版本缓存标签自动失效重探。
+ *  v2:新增 Donau(dsub/djob)探测——此前被误标 none 的 Donau 集群会自动纠正。 */
+export const SCHEDULER_PROBE_VERSION = 2;
 
 const TAGS_PATH = () => dataPath('scheduler-tags.json');
 
@@ -41,7 +47,7 @@ export async function loadSchedulerTag(key: string): Promise<SchedulerTag | null
     const all = JSON.parse(raw);
     const tag = all?.[key];
     const kind = normalizeSchedulerKind(tag?.kind);
-    return kind ? { kind, detectedAt: Number(tag.detectedAt) || 0, hasModule: tag.hasModule, installers: tag.installers } : null;
+    return kind ? { kind, detectedAt: Number(tag.detectedAt) || 0, hasModule: tag.hasModule, installers: tag.installers, probeVersion: Number(tag.probeVersion) || undefined } : null;
   } catch {
     return null;
   }
@@ -52,7 +58,7 @@ export async function saveSchedulerTag(key: string, tag: Omit<SchedulerTag, 'det
   try {
     all = JSON.parse(await fs.readFile(TAGS_PATH(), 'utf-8'));
   } catch { /* 首次或损坏：重建 */ }
-  const saved: SchedulerTag = { ...tag, detectedAt: Date.now() };
+  const saved: SchedulerTag = { ...tag, detectedAt: Date.now(), probeVersion: SCHEDULER_PROBE_VERSION };
   all[key] = saved;
   const file = TAGS_PATH();
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -104,7 +110,8 @@ export async function resolveAccountScheduler(
 ): Promise<SchedulerTag> {
   const key = schedulerTagKey(info);
   const cached = await loadSchedulerTag(key);
-  if (cached) return cached;
+  // 探测逻辑升级后旧标签自动失效重探(如 0.5.7 才认识 Donau,旧版标的 none 是错的)
+  if (cached && cached.probeVersion === SCHEDULER_PROBE_VERSION) return cached;
   let probe: EnvProbeResult = { kind: 'none', hasModule: false, installers: [] };
   try {
     probe = parseSchedulerProbe(await exec(SCHEDULER_PROBE_COMMAND, 20_000));

@@ -45,6 +45,27 @@ describe('schedulerProfile（账号级调度器标签）', () => {
     expect((await loadSchedulerTag(schedulerTagKey(info)))?.kind).toBe('slurm');
   });
 
+  it('re-probes once when the cached tag predates the current probe version', async () => {
+    const mod = await freshModule();
+    const info = { username: 'che24', host: 'hpc2.example.edu', port: 18082 };
+    // 先正常存一个标签,再把 probeVersion 抹掉,模拟旧版本留下的历史标签
+    await mod.saveSchedulerTag(mod.schedulerTagKey(info), { kind: 'none' });
+    const tagFile = path.join(state.tmpRoot, 'scheduler-tags.json');
+    const all = JSON.parse(await fs.readFile(tagFile, 'utf8'));
+    delete all[mod.schedulerTagKey(info)].probeVersion;
+    await fs.writeFile(tagFile, JSON.stringify(all));
+    let probes = 0;
+    const exec = async () => { probes += 1; return 'SCHED:DONAU\nMODULE:YES'; };
+    const re = await mod.resolveAccountScheduler(info, exec);
+    expect(re.kind).toBe('donau');
+    expect(probes).toBe(1);
+    // 重探后的新标签带当前探测版本,之后命中缓存不再重探
+    const cached = await mod.loadSchedulerTag(mod.schedulerTagKey(info));
+    expect(cached?.probeVersion).toBe(mod.SCHEDULER_PROBE_VERSION);
+    await mod.resolveAccountScheduler(info, exec);
+    expect(probes).toBe(1);
+  });
+
   it('different accounts on different clusters do not share tags', async () => {
     const { resolveAccountScheduler, schedulerTagKey } = await freshModule();
     const a = await resolveAccountScheduler({ username: 'bob', host: 'a.edu', port: 22 }, async () => 'SCHED:LSF\nMODULE:YES');
