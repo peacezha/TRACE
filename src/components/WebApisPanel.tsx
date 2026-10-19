@@ -11,6 +11,7 @@ import {
   Database,
   ExternalLink,
   Loader2,
+  MessageSquare,
   Play,
   RefreshCw,
   Search,
@@ -111,6 +112,13 @@ type InvokeResult = InvokeSuccess | InvokeFailure;
 type StatusLevel = 'ok' | 'fail' | 'unknown';
 
 /** 状态灯语义：绿=最近探测可用；红=探测失败；黄=未测试或缓存已过期（超过 10 分钟） */
+/** 「试一下」结果 → 发给 AI 的正文(项目 tsconfig 非 strict,union 收窄不生效,用显式断言) */
+function tryBodyForAi(result: InvokeResult): string {
+  if (result.ok === true) return formatTryBody(result as InvokeSuccess).slice(0, 4000);
+  const failure = result as InvokeFailure;
+  return `调用失败:${failure.error.code} ${failure.error.message}`;
+}
+
 function statusOf(probe: ProbeState | undefined, stale: boolean): StatusLevel {
   if (!probe || stale) return 'unknown';
   return probe.ok ? 'ok' : 'fail';
@@ -123,7 +131,7 @@ function formatTryBody(result: InvokeSuccess): string {
   return `${raw.slice(0, TRY_RESULT_DISPLAY_LIMIT)}\n…（已截断，完整结果由后端返回）`;
 }
 
-export default function WebApisPanel() {
+export default function WebApisPanel({ onAskAi }: { onAskAi?: (text: string) => void }) {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [catalogError, setCatalogError] = useState('');
   const [loadingCatalog, setLoadingCatalog] = useState(true);
@@ -321,6 +329,7 @@ export default function WebApisPanel() {
                 service={service}
                 status={statusOf(probes[service.id], probesStale)}
                 probe={probes[service.id]}
+                onAskAi={onAskAi}
               />
             ))}
           </div>
@@ -357,10 +366,12 @@ function WebApiServiceCard({
   service,
   status,
   probe,
+  onAskAi,
 }: {
   service: CatalogService;
   status: StatusLevel;
   probe?: ProbeState;
+  onAskAi?: (text: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<ServiceDetail | null>(null);
@@ -473,6 +484,16 @@ function WebApiServiceCard({
         >
           <ExternalLink className="h-3 w-3" /> 文档
         </a>
+        {onAskAi && (
+          <button
+            type="button"
+            title="把该服务交给 AI,让 AI 告诉你它能查什么、怎么查"
+            onClick={() => onAskAi(`请使用数据资源板块已集成的 ${service.name} 服务(服务 id:${service.id})。先用 search_web_apis 找到它的端点,告诉我它能查什么、需要哪些参数;我随后补充要查的具体内容。`)}
+            className="flex items-center gap-0.5 text-accent hover:underline"
+          >
+            <MessageSquare className="h-3 w-3" /> 问 AI
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void toggleExpanded()}
@@ -537,6 +558,16 @@ function WebApiServiceCard({
                       data-testid={`webapi-try-result-${service.id}-${endpoint.id}`}
                     >
                       <TryResultView result={result} />
+                      {onAskAi && (
+                        <button
+                          type="button"
+                          title="把这次调用的返回发给 AI 解读"
+                          onClick={() => onAskAi(`这是数据资源板块里 ${service.name} 的 ${endpoint.name} 端点(${endpoint.method} ${endpoint.path})的返回结果,帮我解读并给出结论:\n\n${tryBodyForAi(result)}`)}
+                          className="mt-1 flex items-center gap-1 text-[10px] text-accent hover:underline"
+                        >
+                          <MessageSquare className="h-3 w-3" /> 发给 AI 解读
+                        </button>
+                      )}
                     </div>
                   )}
                 </li>

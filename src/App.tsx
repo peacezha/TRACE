@@ -290,6 +290,19 @@ export default function App() {
     )));
   }, []);
 
+  /** 数据资源等板块"问 AI"通道:在当前对话追加用户消息并触发 AI 作答,同时切回对话视图。 */
+  const askAi = useCallback((text: string) => {
+    const content = String(text || '').trim();
+    const tab = activeTab;
+    if (!content || !tab) return;
+    setWorkspaceView('chat');
+    setWorkbenchSidebarTab('conversations');
+    updateConversationTab(tab.sessionId, tab.conversationContextId, {
+      messages: [...tab.messages, { role: 'user', content }],
+    });
+    setTriggerAI(prev => ({ tabId: tab.sessionId, count: prev.count + 1 }));
+  }, [activeTab, updateConversationTab]);
+
   // ─── Auto-save conversation + backup to cluster ─────────────────
   // Retry helper: retry fetch on network errors with exponential backoff
   const fetchWithRetry = async (url: string, options: RequestInit, maxRetries = 3): Promise<Response> => {
@@ -1047,7 +1060,7 @@ export default function App() {
           {/* 数据资源页：公共生信数据库 API 目录与连通性测试。
               始终挂载（hidden 保活），卡片展开/搜索结果不随视图切换丢失。 */}
           <div className={workspaceView === 'webapis' ? 'h-full' : 'hidden'}>
-            <WebApisPanel />
+            <WebApisPanel onAskAi={askAi} />
           </div>
 
         </main>

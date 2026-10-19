@@ -1,5 +1,6 @@
 import type { Express, Response } from 'express';
 import { resolveRequestSessionId } from '../cluster/sessionRequest';
+import { saveSchedulerTag, schedulerTagKey } from '../cluster/schedulerProfile';
 import type { JobEntry } from '../ai/types';
 import { loadJobEvents } from './jobWatcher';
 import {
@@ -14,6 +15,8 @@ interface NotifyRouteSession {
     /** 登录探测打标签的调度器；旧会话可能缺省 */
     scheduler?: SchedulerType;
   };
+  /** 会话账号信息,按会话切换调度器时用于持久化标签 */
+  info?: { username: string; host: string; port?: number | string };
 }
 
 type ResolveSession = (sessionId: string | undefined) => NotifyRouteSession | undefined;
@@ -196,16 +199,23 @@ export function registerNotificationRoutes(
     }
   });
 
-  // 当前调度器（lsf / slurm）
-  app.get('/api/jobs/scheduler', async (_req, res) => {
+  // 当前调度器：请求带会话时返回该会话登录探测的标签(多集群各自显示各自的),
+  // 无会话/旧会话缺标签时回退全局配置。
+  app.get('/api/jobs/scheduler', async (req, res) => {
     try {
-      res.json({ success: true, scheduler: await loadSchedulerType() });
+      const session = resolveSession(resolveRequestSessionId({
+        cookie: (req.session as any)?.sshSessionId,
+        header: req.get('X-SSH-Session-Id'),
+        auth: undefined,
+      }, id => Boolean(resolveSession(id))) ?? undefined);
+      res.json({ success: true, scheduler: session?.cluster.scheduler ?? await loadSchedulerType() });
     } catch (err: any) {
       sendError(res, 500, err.message || String(err));
     }
   });
 
-  // 切换调度器
+  // 切换调度器：带会话时改该会话的标签(内存立即生效 + 按账号持久化),
+  // 不再写全局值导致别的集群被连带切换;无会话时才写全局默认。
   app.put('/api/jobs/scheduler', async (req, res) => {
     try {
       const scheduler = req.body?.scheduler;
@@ -213,8 +223,19 @@ export function registerNotificationRoutes(
         sendError(res, 400, 'scheduler 必须是 lsf/slurm/pbs/donau/none 之一');
         return;
       }
+      const session = resolveSession(resolveRequestSessionId({
+        cookie: (req.session as any)?.sshSessionId,
+        header: req.get('X-SSH-Session-Id'),
+        auth: undefined,
+      }, id => Boolean(resolveSession(id))) ?? undefined);
+      if (session && session.info) {
+        session.cluster.scheduler = scheduler as SchedulerType;
+        await saveSchedulerTag(schedulerTagKey(session.info), { kind: scheduler });
+        res.json({ success: true, scheduler, scope: 'session' });
+        return;
+      }
       await saveSchedulerType(scheduler as SchedulerType);
-      res.json({ success: true, scheduler });
+      res.json({ success: true, scheduler, scope: 'global' });
     } catch (err: any) {
       sendError(res, 500, err.message || String(err));
     }

@@ -1038,7 +1038,12 @@ registerTransferRoutes(app, io, resolveRemoteFileSession);
 registerNotificationRoutes(app, (sessionId) => {
   const s = getSession(sessionId);
   if (!s) return undefined;
-  return { cluster: { exec: s.cluster.exec.bind(s.cluster) } };
+  // 会话级调度器(登录探测标签)与账号信息一并下发,供按会话读取/切换;
+  // 缺 scheduler 的旧会话由路由层回退全局配置。
+  return {
+    cluster: { exec: s.cluster.exec.bind(s.cluster), scheduler: s.cluster.scheduler },
+    info: { username: s.info.username, host: s.info.host, port: s.info.port },
+  };
 }, () => [...sessions.values()].map(s => ({
   // 聚合接口（/api/jobs/summary/all）遍历全部会话；connected 过滤在路由内完成
   sessionId: s.id,

@@ -6,6 +6,7 @@ import { TokenBudgetManager, estimateTokens } from './tokenBudget';
 import { formatMemoryForAI } from './memoryOrchestrator';
 import { formatPlanForAI } from './agentPlanner';
 import { fileRecognizer } from './fileRecognizer';
+import { getCachedProbeAll } from '../webapis/health';
 import { clusterContext } from './clusterContext';
 import {
   planConversationCompaction,
@@ -164,6 +165,19 @@ export async function buildSmartContext(input: SmartContextInput): Promise<AIMes
     const summary = clusterContext.summarizeForAI(input.clusterSnapshot, hints);
     fragments.push(clipByTokens(summary, clusterTokens));
   }
+
+  // 数据资源健康度(v0.5.10+):数据资源面板的连通探针缓存新鲜时,把当前不可达的
+  // 服务告诉模型,避免它调用死服务浪费轮次;全部可达时给一句"都能用"。
+  try {
+    const probeCache = getCachedProbeAll();
+    if (probeCache && probeCache.results.length > 0) {
+      const down = probeCache.results.filter(r => !r.ok).map(r => r.serviceId);
+      const upCount = probeCache.results.length - down.length;
+      fragments.push(down.length === 0
+        ? `## 数据资源状态\n已测试的 ${upCount} 个公共数据服务当前全部可达,需要公共数据时直接用 search_web_apis/call_web_api。`
+        : `## 数据资源状态\n当前探测不可达的数据服务(本轮不要调用,调用只会浪费一轮):${down.join('、')};其余 ${upCount} 个可达。`);
+    }
+  } catch { /* 探针缓存不可用时跳过,不影响上下文 */ }
 
   // Task plan (agent mode)
   if (input.taskPlan) {
