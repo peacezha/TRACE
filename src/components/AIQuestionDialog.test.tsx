@@ -19,7 +19,7 @@ describe('question modal', () => {
   });
   it('renders in English with explicit submission and preserves scientific identifiers verbatim', async () => {
     const f = fixture();
-    expect(screen.getByRole('dialog', { name: 'The agent needs your answer' })).toHaveAttribute('aria-modal', 'true');
+    expect(screen.getByRole('dialog', { name: 'The agent needs your answer' })).toHaveAttribute('aria-modal', 'false');
     expect(screen.getByRole('button', { name: /IWGSC RefSeq v1.0/ })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Submit answer' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: /IWGSC RefSeq v1.0/ }));

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { AlertCircle, Check, Loader2 } from 'lucide-react';
 import type { PendingUserQuestion } from '../services/useUserQuestions';
 import type { UserQuestionAnswer } from '@/shared/aiQuestions';
 import { isManualInputChoice, isPathPickerChoice } from '@/shared/askOptions';
 
-/** Kept outside the scrolling chat log: incoming tokens must not hide the answer controls. */
+/** 内嵌在对话流底部(输入框上方)的提问卡:不再用全屏遮罩盖住已输出内容,
+ *  用户可以随时回看上面的对话再作答(v0.5.10 起,原 modal 改 inline)。 */
 export default function AIQuestionDialog({ question, english, busy, error, count, onReply, onPickPath, onDefer, open }: {
   question: PendingUserQuestion; english: boolean; busy: boolean; error: string; count: number;
   onReply: (answer: UserQuestionAnswer | null) => Promise<void>; onPickPath?: () => Promise<string | null>;
@@ -41,8 +41,8 @@ export default function AIQuestionDialog({ question, english, busy, error, count
     setSelected(current => question.multiSelect ? current.includes(label) ? current.filter(item => item !== label) : [...current, label] : [label]);
   };
   if (!open) return null;
-  return createPortal(<div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-3 sm:p-6">
-    <div ref={panel} role="dialog" aria-modal="true" aria-labelledby="ai-question-title" aria-describedby="ai-question-text"
+  return <div className="px-3 pb-2 shrink-0" data-inline-question>
+    <div ref={panel} role="dialog" aria-modal="false" aria-labelledby="ai-question-title" aria-describedby="ai-question-text"
       data-testid="ai-question-dialog" tabIndex={-1}
       onKeyDown={event => {
         // Escape 与"稍后回答"按钮同义：收起问题并保留草稿，但绝不替你回答或取消任务；
@@ -74,7 +74,7 @@ export default function AIQuestionDialog({ question, english, busy, error, count
         if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus(); }
         else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel.current)) { event.preventDefault(); first.focus(); }
       }}
-      className="w-full max-w-xl max-h-[85dvh] flex flex-col overflow-hidden rounded-2xl border border-scholar-600 bg-scholar-900 text-scholar-100 shadow-2xl outline-none">
+      className="w-full max-h-[55dvh] flex flex-col overflow-hidden rounded-2xl border border-accent/60 bg-scholar-900 text-scholar-100 shadow-2xl outline-none">
       <header className="flex gap-3 items-start p-5 pb-3 shrink-0">
         <AlertCircle className="h-5 w-5 text-accent shrink-0 mt-0.5" />
         <div>
@@ -112,5 +112,5 @@ export default function AIQuestionDialog({ question, english, busy, error, count
         </footer>
       </form>
     </div>
-  </div>, document.body);
+  </div>;
 }

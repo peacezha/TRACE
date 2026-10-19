@@ -17,6 +17,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { bindDshSession, setDshSessionReadOnly, registerDshInteractionHandler, type DshConfirmationPolicy } from './bridgeState';
 import { isClarificationRequest, normalizeQuestionAnswer, clarificationInstruction } from '../../shared/questionIntent';
+import { ensureUserChoiceOptions } from '../../shared/askOptions';
 import { getQuestionLoopGuard } from '../ai/questionLoopGuard';
 import { classifyCommandRisk } from '../ai/commandSafety';
 import { ensureSidecar, getSidecarClient } from './dshSidecar';
@@ -302,8 +303,18 @@ function runEventLoop(opts: DshAgentOptions, client: DshSdkClient, sessionId: st
           const corrections: Array<{ id: string; selected: string[]; custom: string }> = [];
           for (const question of questions) {
             const decision = questionGuard.decide(String(question.question || ''), question.options, explainOnly);
-            if (decision.allowed) forwarded.push(question);
-            else corrections.push({ id: String(question.id || ''), selected: [], custom: decision.feedback });
+            if (decision.allowed) {
+              // dsh 插件的提问可能没有选项:先过守卫(空泛提问仍被拦截),
+              // 再按内置引擎同一兜底规则补齐可点选项,保证提问卡永远带建议。
+              const ensuredLabels = ensureUserChoiceOptions(
+                String(question.question || ''),
+                (question.options || []).map(option => option.label),
+                zh ? 'zh-CN' : 'en-US',
+              );
+              forwarded.push({ ...question, options: ensuredLabels.map(label => ({ label })) });
+            } else {
+              corrections.push({ id: String(question.id || ''), selected: [], custom: decision.feedback });
+            }
           }
           if (corrections.length) blockedQuestions++;
           if (blockedQuestions >= 3) {

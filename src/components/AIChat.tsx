@@ -3,7 +3,7 @@ import { isPublicWeb, readPublicPreference, savePublicPreference } from '../serv
 import {
   Bot, Settings, Send, Brain, Loader2, ChevronDown, ChevronRight, Save, Check, FolderOpen, Folder, FolderTree,
   AlertCircle, Wifi, WifiOff, RefreshCw, Search, BookOpen, Library, FileText, X, MessageSquarePlus,
-  Cpu, GitBranch, Paperclip, ShieldCheck
+  Cpu, GitBranch, Paperclip, ShieldCheck, ArrowDown
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import WorkflowPanel from './WorkflowPanel';
@@ -874,10 +874,14 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   // 用户是否贴在底部附近（阈值 80px）：上翻阅读时置 false，流式追加不再打断阅读
   const stickToBottomRef = useRef(true);
+  // 渲染态镜像(ref 不触发重渲染):"回到底部"悬浮按钮的显隐依据
+  const [atBottom, setAtBottom] = useState(true);
   const handleMessagesScroll = () => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickToBottomRef.current = near;
+    setAtBottom(near);
   };
   // 直接滚动消息容器：scrollIntoView 会滚动所有可滚动祖先，与浏览器滚动锚定拉扯导致列表闪烁。
   // 容器 CSS 已加 overflow-anchor:none，贴底判定由 stickToBottomRef 负责。
@@ -885,9 +889,24 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
     const el = messagesContainerRef.current;
     if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   };
+  const jumpToBottom = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    stickToBottomRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    setAtBottom(true);
+  };
   useEffect(() => { scrollToBottom(); }, [messages, streamingContent, isStreaming]);
   // 技能库/流程页切回对话时消息容器重建（scrollTop 归零），恢复贴底位置
   useEffect(() => { if (activeTab === 'chat') scrollToBottom(); }, [activeTab]);
+  // 消息区内图片/HTML 卡片异步加载会撑高内容把视口顶到中间:
+  // 任何子资源加载完成时,只要用户原本贴在底部就重新贴底(不影响上翻阅读的人)。
+  const handleContentLoad = () => {
+    if (stickToBottomRef.current) {
+      const el = messagesContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  };
 
   // Only a real conversation switch clears interactions. Adding the question to
   // messages must NOT immediately erase the answer controls (v0.4.47 regression).
@@ -915,6 +934,18 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
       stickToBottomRef.current = true;
     }
     agentPlanConversationRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  // 打开/切换对话后多次贴底:消息是异步拉取填充的,图片与 HTML 卡片还会继续
+  // 撑高,单次贴底会被顶回中间(用户实测"点开记录停在中间")。50/250/800ms
+  // 三个时点兜底,配合 onLoadCapture 的增量贴底。
+  useEffect(() => {
+    if (!activeConversationId) return;
+    const timers = [50, 250, 800].map(ms => setTimeout(() => {
+      const el = messagesContainerRef.current;
+      if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    }, ms));
+    return () => { for (const timer of timers) clearTimeout(timer); };
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -2195,7 +2226,8 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
             </div>
           )}
           {/* Messages */}
-          <div ref={messagesContainerRef} onScroll={handleMessagesScroll} data-chat-messages className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-1 [overflow-anchor:none]">
+          <div className="relative flex-1 min-h-0 flex flex-col">
+          <div ref={messagesContainerRef} onScroll={handleMessagesScroll} onLoadCapture={handleContentLoad} data-chat-messages className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-1 [overflow-anchor:none]">
             {loadingConversationId && (
               <div className="flex flex-col items-center justify-center h-full text-scholar-400 text-xs gap-3 px-4">
                 <Loader2 className="w-8 h-8 animate-spin text-accent" />
@@ -2336,6 +2368,14 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
             )}
 
             <div ref={messagesEndRef} />
+          </div>
+          {/* 上翻阅读时的"回到底部"直达按钮:新消息落地自动贴底后消失 */}
+          {!atBottom && (
+            <button type="button" onClick={jumpToBottom}
+              className="absolute bottom-4 right-4 z-10 flex items-center gap-1.5 rounded-full border border-accent/50 bg-scholar-900/95 px-3 py-1.5 text-xs text-accent shadow-lg shadow-black/40 hover:bg-scholar-800">
+              <ArrowDown className="w-3.5 h-3.5" />{isEnglish ? 'Back to bottom' : '回到底部'}
+            </button>
+          )}
           </div>
 
           {/* 信任全部激活时的常驻提示（无待确认命令时也可一键取消） */}
