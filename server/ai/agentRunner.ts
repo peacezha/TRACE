@@ -33,6 +33,7 @@ import type { WorkflowExecutionContext } from '../../shared/workflowExecution';
 import type { WorkflowRunPatch } from '../../shared/workflowRun';
 import { qcPauseReason, unresolvedQcFailures } from '../../shared/workflowQc';
 import { ensureUserChoiceOptions } from '../../shared/askOptions';
+import { looksLikeAwaitingUserChoice } from '../../shared/questionIntent';
 import { isClarificationRequest, clarificationInstruction } from '../../shared/questionIntent';
 import { getQuestionLoopGuard } from './questionLoopGuard';
 import { searchPublicResource } from './publicResourceSearch';
@@ -2661,6 +2662,15 @@ export async function runAgent(
     if (!finalDoneText && workflowExecutor && activeWorkflowRun) {
       const stepInfo = `${activeWorkflowRun.currentStep ?? '?'}/${activeWorkflowRun.totalSteps ?? '?'}`;
       cb.onDone(`本轮已结束。当前流程状态:${activeWorkflowRun.status || '未知'},进行到第 ${stepInfo} 步。`);
+    } else if (!guardDoneText && !askedUser && finalDoneText && looksLikeAwaitingUserChoice(finalDoneText)) {
+      // 模型把"等用户选择"写成了普通文本而没有调用 ask_user(实测:用户只看到
+      // 一段无按钮的文字,没有建议选项)。转成正式提问:前端会渲染带选项的卡片,
+      // 回答作为下一轮用户消息进来;本轮按 ask 收尾。
+      const options = ensureUserChoiceOptions(finalDoneText, [], ctx.locale);
+      console.warn('[Agent] 模型用文字提问而未调用 ask_user,已转为带选项的正式提问');
+      askedUser = true;
+      cb.onAsk(finalDoneText, options);
+      cb.onDone('__ASK__');
     } else {
       cb.onDone(finalDoneText);
     }

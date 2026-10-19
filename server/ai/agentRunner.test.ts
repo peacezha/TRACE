@@ -277,6 +277,21 @@ describe('runAgent ask_user handling', () => {
       [{ role: 'assistant', content: '❓ 选择参考版本？' }, { role: 'user', content: 'IWGSC v1.0' }]);
     expect(onAsk).not.toHaveBeenCalled();
   });
+
+  it('converts a plain-text choice question into a real ask with options', async () => {
+    const onAsk = vi.fn(); const onDone = vi.fn();
+    mockStreamText.mockImplementation((options: any) => ({ fullStream: (async function* () {
+      yield { type: 'text-delta', text: '文献侧只有 peak BED，无法给你 bw/BAM。比对请选一个方向，我按你选的提交作业：' };
+    })() }));
+    await runAgent({ sid: 'question-test', run: vi.fn(), profile: { provider: 'deepseek', model: 'test', apiKey: 'test' } },
+      { onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onToolResult: vi.fn(), onStep: vi.fn(), onAsk, onDone, onErr: vi.fn(), sig: () => undefined },
+      [{ role: 'user', content: '文献里有没有 bam 或 bw 文件，我要和我的做比对' }]);
+    expect(onAsk).toHaveBeenCalledTimes(1);
+    const [question, options] = onAsk.mock.calls[0] as unknown as [string, string[]];
+    expect(question).toContain('请选一个方向');
+    expect(options.length).toBeGreaterThanOrEqual(2);
+    expect(onDone).toHaveBeenCalledWith('__ASK__');
+  });
   it('keeps formal RUN tools out of a general cluster conversation', async () => {
     mockStreamText.mockImplementation((options: any) => ({
       fullStream: (async function* () {
