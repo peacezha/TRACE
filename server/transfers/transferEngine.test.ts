@@ -394,6 +394,110 @@ describe('TransferEngine', () => {
       expect(events[events.length - 1].state).toBe('completed');
     });
   });
+
+  describe('session keepalive（断线保活）', () => {
+    it('calls ensureSessionAlive when a transfer hits a dropped session and completes once revived', async () => {
+      const adapter = defaultAdapter();
+      const ensureSessionAlive = vi.fn(async () => true);
+      adapter.ensureSessionAlive = ensureSessionAlive;
+      let writeAttempts = 0;
+      adapter.openRemoteWrite = vi.fn(() => {
+        writeAttempts++;
+        if (writeAttempts === 1) throw new Error('SSH session not found');
+        return new Writable({ write(_chunk, _encoding, cb) { cb(); } });
+      });
+
+      const engine = new TransferEngine(adapter, { concurrency: 1, emit: () => {} });
+      const task = enqueueFixture(engine);
+      await engine.resume(task.id, 'session-1');
+      await engine.waitForIdle();
+
+      expect(engine.list()[0].state).toBe('completed');
+      expect(writeAttempts).toBe(2);
+      expect(ensureSessionAlive).toHaveBeenCalledWith('session-1');
+    });
+
+    it('retries "SSH session not found" up to three times (断连错误进重试名单)', async () => {
+      const adapter = defaultAdapter();
+      adapter.verify = vi.fn(async () => { throw new Error('SSH session not found'); });
+
+      const engine = new TransferEngine(adapter, { concurrency: 1, emit: () => {} });
+      const task = enqueueFixture(engine);
+      await engine.resume(task.id, 'session-1');
+      await engine.waitForIdle();
+
+      // 首次 + 3 次重试
+      expect(adapter.verify).toHaveBeenCalledTimes(4);
+      expect(engine.list()[0].state).toBe('failed');
+      expect(engine.list()[0].retryCount).toBe(3);
+    });
+
+    it('fails through the normal retry-exhaustion path when the session cannot be revived', async () => {
+      const adapter = defaultAdapter();
+      const ensureSessionAlive = vi.fn(async () => false);
+      adapter.ensureSessionAlive = ensureSessionAlive;
+      adapter.openRemoteWrite = vi.fn(() => new Writable({
+        write(_chunk, _encoding, cb) { cb(); },
+      }));
+
+      const engine = new TransferEngine(adapter, { concurrency: 1, emit: () => {} });
+      const task = enqueueFixture(engine);
+      await engine.resume(task.id, 'session-1');
+      await engine.waitForIdle();
+
+      // 阶段预检抛 "SSH session not found"，传输体从未执行；重试耗尽后按原逻辑失败
+      expect(adapter.openRemoteWrite).not.toHaveBeenCalled();
+      expect(ensureSessionAlive).toHaveBeenCalledWith('session-1');
+      expect(engine.list()[0].state).toBe('failed');
+      expect(engine.list()[0].retryCount).toBe(3);
+      expect(engine.list()[0].error).toContain('SSH session not found');
+    });
+
+    it('keeps permission errors non-retryable even with a keepalive hook installed', async () => {
+      const adapter = defaultAdapter();
+      adapter.ensureSessionAlive = vi.fn(async () => true);
+      adapter.openRemoteWrite = vi.fn(() => new Writable({
+        write(_chunk, _encoding, cb) { cb(new Error('Permission denied')); },
+      }));
+
+      const engine = new TransferEngine(adapter, { concurrency: 1, emit: () => {} });
+      const task = enqueueFixture(engine);
+      await engine.resume(task.id, 'session-1');
+      await engine.waitForIdle();
+
+      expect(engine.list()[0].state).toBe('failed');
+      expect(engine.list()[0].retryCount).toBe(0);
+    });
+  });
+
+  describe('hasSessionActivity（会话淘汰保护）', () => {
+    it('reports queued/running/retrying/paused tasks on sessionId and remote-copy sourceSessionId', () => {
+      const engine = new TransferEngine(defaultAdapter(), { concurrency: 1, emit: () => {} });
+      const task = enqueueFixture(engine);
+      const stored = (engine as any).tasks.get(task.id)!;
+      stored.sessionId = 'session-1';
+
+      // queued 即算活跃；无关会话不受影响
+      expect(engine.hasSessionActivity('session-1')).toBe(true);
+      expect(engine.hasSessionActivity('other-session')).toBe(false);
+
+      for (const state of ['running', 'retrying', 'paused'] as const) {
+        stored.state = state;
+        expect(engine.hasSessionActivity('session-1')).toBe(true);
+      }
+      for (const state of ['completed', 'failed', 'cancelled'] as const) {
+        stored.state = state;
+        expect(engine.hasSessionActivity('session-1')).toBe(false);
+      }
+
+      // remote-copy 的源侧（读取端）会话同样受保护
+      stored.state = 'paused';
+      stored.sessionId = 'dest-session';
+      stored.sourceSessionId = 'source-session';
+      expect(engine.hasSessionActivity('source-session')).toBe(true);
+      expect(engine.hasSessionActivity('dest-session')).toBe(true);
+    });
+  });
 });
 
 describe('remote-copy flow (集群↔集群)', () => {

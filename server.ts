@@ -18,7 +18,8 @@ import {
 import { resolveSocketSessionId } from './server/socketSession';
 import { registerFileRoutes } from './server/files/registerFileRoutes';
 import { registerLocalFileRoutes } from './server/files/registerLocalFileRoutes';
-import { registerTransferRoutes } from './server/transfers/registerTransferRoutes';
+import { hasActiveTransfersForSession, registerTransferRoutes } from './server/transfers/registerTransferRoutes';
+import { pickSessionToEvict } from './server/cluster/sessionEviction';
 import { registerNotificationRoutes } from './server/notifications/registerNotificationRoutes';
 import { jobWatcher } from './server/notifications/jobWatcher';
 import { registerWorkflowRoutes } from './server/workflows/registerWorkflowRoutes';
@@ -649,15 +650,16 @@ async function createSession(
     };
   }
 
-  // 多集群标签页：会话共存，仅在上限时淘汰最旧的会话
+  // 多集群标签页：会话共存，仅在上限时淘汰最旧的会话。
+  // 有活跃/暂停传输的会话不淘汰（jobWatcher 也同步不停）：淘汰会连 SSH 一起杀掉
+  // 几个小时的大文件传输。全部会话都有传输时暂时突破上限，也不杀传输。
   const MAX_CLUSTER_SESSIONS = 8;
   while (sessions.size >= MAX_CLUSTER_SESSIONS) {
-    const oldestId = sessions.keys().next().value;
-    if (!oldestId) break;
-    const oldest = sessions.get(oldestId);
-    oldest?.cluster.close();
-    sessions.delete(oldestId);
-    jobWatcher.stop(oldestId);
+    const evictId = pickSessionToEvict(sessions.keys(), hasActiveTransfersForSession);
+    if (!evictId) break;
+    sessions.get(evictId)?.cluster.close();
+    sessions.delete(evictId);
+    jobWatcher.stop(evictId);
   }
 
   const home = await cluster.getHomeDirectory();
@@ -920,6 +922,69 @@ app.post('/api/cluster/scheduler/redetect', async (req, res) => {
   }
 });
 
+/**
+ * 重建已知但已断开的会话（SSH/SFTP/PTY 全套，保留原 sessionId）。
+ * /api/reconnect 与传输引擎的静默保活共用同一实现；并发调用经
+ * active.reconnectPromise 去重，同一时刻最多一次握手。
+ */
+async function reconnectKnownSession(sessionId: string, active: ActiveSession): Promise<void> {
+  if (!active.reconnectPromise) {
+    const reconnecting = (async () => {
+      const inMemory = getTransferCredentials(active.info.host, active.info.port, active.info.username);
+      const credentials = buildReconnectCredentials(active.credentials, inMemory, totpNow);
+      await active.cluster.connect(credentials, async () => false);
+      active.credentials = credentials;
+      active.home = await active.cluster.getHomeDirectory();
+      // 调度器标签随会话恢复：命中磁盘缓存即可，不再发起 SSH 探测
+      if (!active.cluster.scheduler) {
+        try {
+          const { schedulerTagKey, loadSchedulerTag } = await import('./server/cluster/schedulerProfile');
+          const tag = await loadSchedulerTag(schedulerTagKey({
+            username: active.info.username,
+            host: active.info.host,
+            port: active.info.port,
+          }));
+          if (tag) {
+            active.cluster.scheduler = tag.kind;
+            active.cluster.moduleAvailable = tag.hasModule;
+            active.cluster.installers = tag.installers;
+          }
+        } catch { /* 无标签时后续流程按全局配置兜底 */ }
+      }
+      restoreFormalWorkflowMonitoring(sessionId, active);
+      restoreJobAgentBindings(sessionId);
+      jobWatcher.start(sessionId, {
+        cluster: { exec: active.cluster.exec.bind(active.cluster) },
+        username: active.info.username,
+        scheduler: active.cluster.scheduler,
+      });
+      refreshClusterSkillsInBackground(active.cluster.exec.bind(active.cluster), sessionId);
+    })();
+    active.reconnectPromise = reconnecting;
+    void reconnecting.finally(() => {
+      if (active.reconnectPromise === reconnecting) active.reconnectPromise = undefined;
+    }).catch(() => { /* 调用方（路由/保活钩子）拿原始失败 */ });
+  }
+  await active.reconnectPromise;
+}
+
+/**
+ * 传输引擎的会话保活钩子：会话在且 connected → true；已知但断开 → 静默重连，
+ * 成功 true 失败 false；完全未知的会话（已淘汰/从未存在）→ false。
+ */
+async function ensureTransferSessionAlive(sessionId: string): Promise<boolean> {
+  const active = getKnownSession(sessionId);
+  if (!active) return false;
+  if (active.cluster.state !== 'connected') {
+    try {
+      await reconnectKnownSession(sessionId, active);
+    } catch {
+      return false;
+    }
+  }
+  return active.cluster.state === 'connected';
+}
+
 /** 网络中断后保留原 sessionId，重建完整 SSH/SFTP/PTY，而不只是重建 Shell。 */
 app.post('/api/reconnect', async (req, res) => {
   const sessionId = String(req.body?.sessionId || req.get('X-SSH-Session-Id') || '');
@@ -934,44 +999,7 @@ app.post('/api/reconnect', async (req, res) => {
   }
 
   try {
-    if (!active.reconnectPromise) {
-      const reconnecting = (async () => {
-        const inMemory = getTransferCredentials(active.info.host, active.info.port, active.info.username);
-        const credentials = buildReconnectCredentials(active.credentials, inMemory, totpNow);
-        await active.cluster.connect(credentials, async () => false);
-        active.credentials = credentials;
-        active.home = await active.cluster.getHomeDirectory();
-        // 调度器标签随会话恢复：命中磁盘缓存即可，不再发起 SSH 探测
-        if (!active.cluster.scheduler) {
-          try {
-            const { schedulerTagKey, loadSchedulerTag } = await import('./server/cluster/schedulerProfile');
-            const tag = await loadSchedulerTag(schedulerTagKey({
-              username: active.info.username,
-              host: active.info.host,
-              port: active.info.port,
-            }));
-            if (tag) {
-              active.cluster.scheduler = tag.kind;
-              active.cluster.moduleAvailable = tag.hasModule;
-              active.cluster.installers = tag.installers;
-            }
-          } catch { /* 无标签时后续流程按全局配置兜底 */ }
-        }
-        restoreFormalWorkflowMonitoring(sessionId, active);
-        restoreJobAgentBindings(sessionId);
-        jobWatcher.start(sessionId, {
-          cluster: { exec: active.cluster.exec.bind(active.cluster) },
-          username: active.info.username,
-          scheduler: active.cluster.scheduler,
-        });
-        refreshClusterSkillsInBackground(active.cluster.exec.bind(active.cluster), sessionId);
-      })();
-      active.reconnectPromise = reconnecting;
-      void reconnecting.finally(() => {
-        if (active.reconnectPromise === reconnecting) active.reconnectPromise = undefined;
-      }).catch(() => { /* 路由下方向用户返回原始失败 */ });
-    }
-    await active.reconnectPromise;
+    await reconnectKnownSession(sessionId, active);
     res.json({ success: true, sessionId, home: active.home });
   } catch (error) {
     const detail = formatLoginFailure({ output: error instanceof Error ? error.message : String(error) });
@@ -1034,7 +1062,7 @@ const resolveRemoteFileSession = (sessionId: string | undefined) => {
 
 registerFileRoutes(app, resolveRemoteFileSession);
 registerLocalFileRoutes(app);
-registerTransferRoutes(app, io, resolveRemoteFileSession);
+registerTransferRoutes(app, io, resolveRemoteFileSession, ensureTransferSessionAlive);
 registerNotificationRoutes(app, (sessionId) => {
   const s = getSession(sessionId);
   if (!s) return undefined;

@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable, Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createTransferAdapter, registerTransferRoutes } from './registerTransferRoutes';
+import { createTransferAdapter, hasActiveTransfersForSession, registerTransferRoutes } from './registerTransferRoutes';
 
 vi.mock('./transferStore', () => ({
   loadTasks: vi.fn(async () => []),
@@ -269,5 +270,93 @@ describe('registerTransferRoutes batch enqueue', () => {
     const badRes = makeRes();
     await settings(makeReq({ concurrency: 9 }), badRes);
     expect(badRes.status).toHaveBeenCalledWith(400);
+  });
+});
+
+describe('createTransferAdapter stream buffers', () => {
+  it('passes a 512KB highWaterMark to SFTP read/write streams（续传单流提速）', () => {
+    const writeOptions: unknown[] = [];
+    const readOptions: unknown[] = [];
+    const sftp = {
+      createWriteStream: (_path: string, options: unknown) => {
+        writeOptions.push(options);
+        return new Writable({ write(_chunk, _encoding, cb) { cb(); } });
+      },
+      createReadStream: (_path: string, options: unknown) => {
+        readOptions.push(options);
+        return Readable.from(Buffer.alloc(0));
+      },
+    };
+    const adapter = createTransferAdapter(() => ({
+      cluster: { getSftp: () => sftp },
+      home: '/home/alice',
+    } as any));
+
+    adapter.openRemoteWrite('/data/.a.bin.part', 1024, 'ssh-1');
+    adapter.openRemoteRead('/data/a.bin', 2048, 'ssh-1');
+
+    expect(writeOptions[0]).toEqual({ start: 1024, highWaterMark: 512 * 1024 });
+    expect(readOptions[0]).toEqual({ start: 2048, highWaterMark: 512 * 1024 });
+  });
+
+  it('exposes the injected ensureSessionAlive hook on the adapter', () => {
+    const ensure = vi.fn(async () => true);
+    const adapter = createTransferAdapter(() => undefined, ensure);
+    expect(adapter.ensureSessionAlive).toBe(ensure);
+  });
+});
+
+describe('hasActiveTransfersForSession', () => {
+  it('reports sessions with in-flight transfers so the eviction loop can skip them', async () => {
+    // fastPut 永不 resolve：任务稳定停在 running
+    const hangingSession = {
+      cluster: {
+        getSftp: () => ({
+          stat: (_path: string, cb: (err?: Error) => void) => cb(new Error('no sftp in test')),
+          fastPut: () => new Promise<void>(() => {}),
+        }),
+        exec: async () => '',
+      },
+      home: '/home/alice',
+    };
+    const handlers = new Map<string, (req: any, res: any) => unknown>();
+    const app = {
+      get: vi.fn(),
+      post: vi.fn((route: string, handler: (req: any, res: any) => unknown) => { handlers.set(route, handler); }),
+      put: vi.fn(),
+      delete: vi.fn(),
+    };
+    const io = { emit: vi.fn() };
+    await registerTransferRoutes(
+      app as any,
+      io as any,
+      ((id: string) => (id === 'ssh-hang' ? hangingSession : undefined)) as any,
+    );
+
+    expect(hasActiveTransfersForSession('ssh-hang')).toBe(false);
+
+    const create = handlers.get('/api/transfers')!;
+    const res: any = { status: vi.fn(), json: vi.fn() };
+    res.status.mockReturnValue(res);
+    await create({
+      session: {},
+      get: (name: string) => (name === 'X-SSH-Session-Id' ? 'ssh-hang' : undefined),
+      body: {
+        profileId: 'p1',
+        direction: 'upload',
+        localPath: 'D:\\a.bin',
+        remotePath: '/data/a.bin',
+        temporaryPath: '/data/.a.bin.trace-hang.part',
+        totalBytes: 4096,
+        transferredBytes: 0,
+        conflictPolicy: 'overwrite',
+        verificationMode: 'size',
+      },
+    }, res);
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    // 路由内部 await engine.resume → 此时任务已是 running
+    expect(hasActiveTransfersForSession('ssh-hang')).toBe(true);
+    expect(hasActiveTransfersForSession('ssh-other')).toBe(false);
   });
 });

@@ -58,6 +58,12 @@ export interface TransferAdapter {
     sessionId: string,
     onProgress: (transferred: number) => void,
   ): Promise<void>;
+  /**
+   * 会话保活：会话在且 connected → true；已知但断开 → 尝试静默重连，成功 true 失败 false；
+   * 完全未知的会话 → false。注入后引擎在每个传输阶段开始前调用，
+   * 避免大文件传到一半 SSH 断开直接判失败。
+   */
+  ensureSessionAlive?(sessionId: string): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +252,21 @@ export class TransferEngine {
 
   getTask(id: string): TransferTask | undefined {
     return this.tasks.get(id);
+  }
+
+  /**
+   * 该会话是否还有活跃（queued/running/retrying）或暂停待续传的传输。
+   * 会话淘汰循环据此跳过有传输的会话；remote-copy 的源侧会话（sourceSessionId）一并算入。
+   */
+  hasSessionActivity(sessionId: string): boolean {
+    for (const task of this.tasks.values()) {
+      if (task.sessionId !== sessionId && task.sourceSessionId !== sessionId) continue;
+      if (task.state === 'queued' || task.state === 'running'
+        || task.state === 'retrying' || task.state === 'paused') {
+        return true;
+      }
+    }
+    return false;
   }
 
   async pause(id: string): Promise<void> {
@@ -445,8 +466,12 @@ export class TransferEngine {
     this.executeTransfer(id, controller)
         .catch(() => { /* errors handled inside */ })
         .finally(() => {
-          this.running.delete(id);
-          this.activeCount = Math.max(0, this.activeCount - 1);
+          // pause/cancel 已把任务从 running 移除并结算过额度；被中止的执行晚落地时
+          // 只对仍在册的本轮执行结算，否则重复扣减 activeCount 会让 waitForIdle 提前放行
+          if (this.running.get(id)?.controller === controller) {
+            this.running.delete(id);
+            this.activeCount = Math.max(0, this.activeCount - 1);
+          }
           this.checkIdle();
           this.processQueue();
         });
@@ -462,6 +487,9 @@ export class TransferEngine {
     const signal = controller.signal;
 
     try {
+      // 每个阶段开始前先确认会话存活（注入 ensureSessionAlive 时断开会话会被静默重连），
+      // 避免几小时的大文件传输因中途断线/会话被淘汰而直接失败
+      await this.ensureTaskSessionsAlive(task);
       if (task.direction === 'remote-copy' && this.adapter.prepareRemoteCopy) {
         await this.adapter.prepareRemoteCopy({
           sourcePath: task.remotePath,
@@ -481,6 +509,7 @@ export class TransferEngine {
         if (signal.aborted) return;
 
         // Phase 2: verify the temporary file
+        await this.ensureTaskSessionsAlive(task);
         if (task.direction === 'remote-copy') {
           // 两端都是远端：源集群与目标集群临时文件做 size 校验
           const [srcSize, dstSize] = await Promise.all([
@@ -499,6 +528,7 @@ export class TransferEngine {
         if (signal.aborted) return;
 
         // Phase 3: atomic rename
+        await this.ensureTaskSessionsAlive(task);
         if (task.direction === 'upload') {
           await this.adapter.remoteRename(task.temporaryPath, task.remotePath, task.sessionId!);
         } else if (task.direction === 'remote-copy') {
@@ -522,6 +552,11 @@ export class TransferEngine {
       const isRetryable = this.isRetryableError(message);
 
       if (isRetryable && task.retryCount < 3) {
+        // 断连类错误：先尽力静默重连（复用 /api/reconnect 的同一实现），再进入既有退避重试。
+        // 连不上也不阻断重试——下次尝试的阶段预检会再次抛出，重试次数照常累计。
+        await this.ensureTaskSessionsAlive(task).catch(() => {});
+        // 保活等待期间用户可能已暂停/取消：不得把 paused/cancelled 覆盖回 retrying
+        if (signal.aborted) return;
         task.retryCount++;
         task.state = 'retrying';
         task.bytesPerSecond = 0;
@@ -548,6 +583,31 @@ export class TransferEngine {
       // 单个任务终态（成功/失败/取消）必经此处：清理直连互传落盘的临时文件
       // （OTP 凭据、wrapper、传输日志）。递归重试时内层先清，外层再清一次，均幂等
       await this.cleanupDirectTempFiles(task);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  //  Session keepalive
+  // -----------------------------------------------------------------------
+
+  /**
+   * 确认传输用到的会话还活着；适配器注入 ensureSessionAlive 时，断开的会话会在此
+   * 被静默重连。连不上抛 "SSH session not found"——该错误在 isRetryableError 名单里，
+   * 由 executeTransfer 的退避重试接管。
+   */
+  private async ensureSessionAlive(sessionId: string | undefined): Promise<void> {
+    const ensure = this.adapter.ensureSessionAlive;
+    if (!ensure || !sessionId) return;
+    if (!await ensure(sessionId)) {
+      throw new Error('SSH session not found');
+    }
+  }
+
+  /** remote-copy 同时依赖源（读）与目标（写）两个会话，任一断开都无法继续 */
+  private async ensureTaskSessionsAlive(task: TransferTask): Promise<void> {
+    await this.ensureSessionAlive(task.sessionId);
+    if (task.direction === 'remote-copy') {
+      await this.ensureSessionAlive(task.sourceSessionId);
     }
   }
 
@@ -1101,6 +1161,11 @@ export class TransferEngine {
       'write epipe',
       'read econnreset',
       'transport closed',
+      // SSH 会话中断/被淘汰类：配合 ensureSessionAlive 静默重连后重试。
+      // 权限类错误（permission denied / EACCES / 权限不足）不含这些字样，不会被误吞。
+      'ssh session not found',
+      'not connected',
+      'channel',
     ];
     return patterns.some(p => lower.includes(p));
   }

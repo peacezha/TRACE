@@ -24,11 +24,37 @@ export interface TransferRouteSession {
 
 type ResolveTransferSession = (sessionId: string | undefined) => TransferRouteSession | undefined;
 
+/** 会话保活钩子：connected → true；已知但断开 → 静默重连；未知/重连失败 → false */
+type EnsureSessionAlive = (sessionId: string) => Promise<boolean>;
+
+/**
+ * 单流续传通道的缓冲区：ssh2 createReadStream/createWriteStream 默认 64KB，
+ * 每块等一个 RTT；512KB 把每 RTT 搬运量放大 8 倍（续传 offset>0 走的就是这条路径）。
+ */
+const SFTP_STREAM_HIGH_WATER_MARK = 512 * 1024;
+
+// ---------------------------------------------------------------------------
+//  Active-session registry（server.ts 会话淘汰循环据此跳过有传输的会话）
+// ---------------------------------------------------------------------------
+
+const registeredEngines = new Set<TransferEngine>();
+
+/** 该会话是否还有活跃（queued/running/retrying）或暂停待续传的传输 */
+export function hasActiveTransfersForSession(sessionId: string): boolean {
+  for (const engine of registeredEngines) {
+    if (engine.hasSessionActivity(sessionId)) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 //  Production adapter
 // ---------------------------------------------------------------------------
 
-export function createTransferAdapter(resolveSession: ResolveTransferSession): TransferAdapter {
+export function createTransferAdapter(
+  resolveSession: ResolveTransferSession,
+  ensureSessionAlive?: EnsureSessionAlive,
+): TransferAdapter {
   const getSftp = (sessionId: string) => {
     const session = resolveSession(sessionId);
     if (!session) throw new Error('SSH session not found');
@@ -44,6 +70,8 @@ export function createTransferAdapter(resolveSession: ResolveTransferSession): T
     });
 
   return {
+    ensureSessionAlive,
+
     remoteSize: async (remotePath, sessionId) => {
       const attrs = await statRemote(remotePath, sessionId);
       return attrs.size;
@@ -59,12 +87,12 @@ export function createTransferAdapter(resolveSession: ResolveTransferSession): T
 
     openRemoteWrite: (remotePath, offset, sessionId) => {
       const sftp = getSftp(sessionId);
-      return sftp.createWriteStream(remotePath, { start: offset });
+      return sftp.createWriteStream(remotePath, { start: offset, highWaterMark: SFTP_STREAM_HIGH_WATER_MARK });
     },
 
     openRemoteRead: (remotePath, offset, sessionId) => {
       const sftp = getSftp(sessionId);
-      return sftp.createReadStream(remotePath, { start: offset });
+      return sftp.createReadStream(remotePath, { start: offset, highWaterMark: SFTP_STREAM_HIGH_WATER_MARK });
     },
 
     openLocalWrite: (localPath, offset) =>
@@ -285,8 +313,9 @@ export async function registerTransferRoutes(
   app: Express,
   io: SocketIOServer,
   resolveSession: ResolveTransferSession,
+  ensureSessionAlive?: EnsureSessionAlive,
 ): Promise<void> {
-  const adapter = createTransferAdapter(resolveSession);
+  const adapter = createTransferAdapter(resolveSession, ensureSessionAlive);
 
   const engine = new TransferEngine(adapter, {
     concurrency: 4,
@@ -299,6 +328,7 @@ export async function registerTransferRoutes(
       }
     },
   });
+  registeredEngines.add(engine);
 
   const requestSessionId = (req: Request): string | undefined =>
     resolveRequestSessionId({
