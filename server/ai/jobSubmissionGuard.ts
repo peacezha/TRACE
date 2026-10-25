@@ -17,7 +17,7 @@ export interface JobSubmissionRecord {
   scopeKey: string;
   intent: string;
   commandHash: string;
-  state: 'submitting' | 'submitted';
+  state: 'submitting' | 'submitted' | 'unknown';
   claimId?: string;
   jobIds: string[];
   createdAt: number;
@@ -32,6 +32,7 @@ export interface JobSubmissionClaim {
 export type JobSubmissionDecision =
   | { kind: 'execute'; claim: JobSubmissionClaim }
   | { kind: 'reuse'; record: JobSubmissionRecord; states: Record<string, string>; reason: 'active' | 'recent_unknown' }
+  | { kind: 'unknown'; record: JobSubmissionRecord }
   | { kind: 'busy'; record: JobSubmissionRecord };
 
 interface PrepareOptions extends JobSubmissionScope {
@@ -41,6 +42,17 @@ interface PrepareOptions extends JobSubmissionScope {
   now?: number;
 }
 
+export const SUBMISSION_UNKNOWN_GUIDANCE = '提交结果未知：调度器可能已经接收作业。请先用调度器作业列表/历史记录核实，不能盲目重试或重新提交。';
+
+/** 只有远端进程明确以非零状态退出，才能认定提交命令被拒绝并释放防重记录。 */
+export function isDefiniteSubmissionRejection(error: unknown): boolean {
+  const text = String(error instanceof Error ? error.message : error);
+  if (/timed? ?out|socket|reset|refused|unreach|transport|econn|network|ssh|connection|channel|handshake/i.test(text)) {
+    return false;
+  }
+  return /(?:exited with code|exit code|exit status)\s*:?\s*\d+/i.test(text);
+}
+
 const MAX_RECORDS = 500;
 const SUBMITTING_LEASE_MS = 2 * 60_000;
 const UNKNOWN_STATE_GRACE_MS = 10 * 60_000;
@@ -48,6 +60,7 @@ const ACTIVE_LSF_STATES = new Set(['PEND', 'RUN', 'WAIT', 'PROV', 'PSUSP', 'USUS
 const ACTIVE_SLURM_STATES = new Set([
   'PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'RESIZING', 'SUSPENDED', 'STAGE_OUT',
 ]);
+const TERMINAL_DONAU_STATES = new Set(['SUCCEEDED', 'FAILED', 'STOPPED', 'SSTOPPED']);
 
 function stableHash(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -69,10 +82,11 @@ function explicitWorkingDirectory(command: string): string | undefined {
 }
 
 function submissionScript(command: string): { scheduler: string; script?: string } | undefined {
-  const schedulerMatch = command.match(/\b(bsub|sbatch|qsub)\b/i);
+  const schedulerMatch = command.match(/\b(bsub|sbatch|qsub|dsub)\b/i);
   if (!schedulerMatch) return undefined;
   const scheduler = schedulerMatch[1].toLowerCase();
   const tail = command.slice((schedulerMatch.index ?? 0) + schedulerMatch[0].length);
+  if (scheduler === 'dsub' && !/^\s*(?:[^\n;&|]*\s)?-s(?:\s|$)/.test(tail)) return undefined;
 
   if (scheduler === 'bsub') {
     // A single '< file' is the common LSF script form. Do not treat a heredoc
@@ -194,7 +208,7 @@ export class JobSubmissionGuard {
         this.records = parsed.filter((item): item is JobSubmissionRecord => Boolean(
           item && typeof item.key === 'string' && typeof item.sessionId === 'string'
           && typeof item.scopeKey === 'string' && typeof item.intent === 'string'
-          && (item.state === 'submitting' || item.state === 'submitted')
+          && (item.state === 'submitting' || item.state === 'submitted' || item.state === 'unknown')
           && Array.isArray(item.jobIds) && typeof item.updatedAt === 'number',
         ));
       }
@@ -211,11 +225,15 @@ export class JobSubmissionGuard {
   private begin(scope: JobSubmissionScope, command: string, now: number):
     | { kind: 'execute'; claim: JobSubmissionClaim }
     | { kind: 'existing'; record: JobSubmissionRecord }
+    | { kind: 'unknown'; record: JobSubmissionRecord }
     | { kind: 'busy'; record: JobSubmissionRecord } {
     const canonical = canonicalSubmissionIntent(command, scope);
     const key = stableHash(`${scope.sessionId}\0${canonical.scopeKey}\0${canonical.intent}`);
     const records = this.load();
     const existing = records.find(record => record.key === key);
+    if (existing?.state === 'unknown') {
+      return { kind: 'unknown', record: cloneRecord(existing) };
+    }
     if (existing?.state === 'submitting' && now - existing.updatedAt < SUBMITTING_LEASE_MS) {
       return { kind: 'busy', record: cloneRecord(existing) };
     }
@@ -261,7 +279,7 @@ export class JobSubmissionGuard {
   async prepare(options: PrepareOptions): Promise<JobSubmissionDecision> {
     const now = options.now ?? Date.now();
     const first = this.begin(options, options.command, now);
-    if (first.kind === 'execute' || first.kind === 'busy') return first;
+    if (first.kind === 'execute' || first.kind === 'busy' || first.kind === 'unknown') return first;
 
     const states = await probeSchedulerJobStates(options.exec, options.scheduler, first.record.jobIds);
     const active = first.record.jobIds.some(jobId => isActiveSchedulerState(options.scheduler, states[jobId]));
@@ -277,13 +295,38 @@ export class JobSubmissionGuard {
   complete(claim: JobSubmissionClaim, jobIds: string[], now = Date.now()): void {
     const record = this.load().find(item => item.key === claim.key && item.claimId === claim.claimId);
     if (!record) return;
-    record.state = 'submitted';
-    record.claimId = undefined;
     record.jobIds = [...new Set(jobIds.filter(Boolean))];
+    record.state = record.jobIds.length > 0 ? 'submitted' : 'unknown';
+    record.claimId = undefined;
     record.updatedAt = now;
     this.persist();
   }
 
+  /** 网络/超时/无回执均调用这里；持久 unknown 不参与 submitting 租约重试。 */
+  markUnknown(claim: JobSubmissionClaim, now = Date.now()): void {
+    const record = this.load().find(item => item.key === claim.key && item.claimId === claim.claimId);
+    if (!record) return;
+    record.state = 'unknown';
+    record.claimId = undefined;
+    record.updatedAt = now;
+    this.persist();
+  }
+
+  /** 仅在用户明确确认“已核实未提交并允许重试”后解除 unknown，绝不按时间自动解锁。 */
+  retryUnknown(record: JobSubmissionRecord, now = Date.now()): JobSubmissionClaim {
+    const current = this.load().find(item => item.key === record.key);
+    if (!current || current.state !== 'unknown' || current.updatedAt !== record.updatedAt) {
+      throw new Error('提交未知状态已变化，请重新核实后再试');
+    }
+    const claimId = crypto.randomUUID();
+    current.state = 'submitting';
+    current.claimId = claimId;
+    current.updatedAt = now;
+    this.persist();
+    return { key: current.key, claimId };
+  }
+
+  /** 仅在调度器明确拒绝命令时调用；其他失败必须保留 unknown。 */
   fail(claim: JobSubmissionClaim): void {
     const records = this.load();
     const index = records.findIndex(item => item.key === claim.key && item.claimId === claim.claimId);
@@ -302,6 +345,7 @@ function isActiveSchedulerState(scheduler: SchedulerKind | undefined, state: str
   if (!normalized) return false;
   if (scheduler === 'slurm') return ACTIVE_SLURM_STATES.has(normalized);
   if (scheduler === 'pbs') return !['C', 'F', 'E', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(normalized);
+  if (scheduler === 'donau') return !TERMINAL_DONAU_STATES.has(normalized);
   return ACTIVE_LSF_STATES.has(normalized);
 }
 
@@ -310,20 +354,28 @@ export async function probeSchedulerJobStates(
   scheduler: SchedulerKind | undefined,
   jobIds: string[],
 ): Promise<Record<string, string>> {
-  const safeIds = [...new Set(jobIds.filter(id => /^[\d._-]+$/.test(id)))];
+  const idPattern = scheduler === 'donau' ? /^\d+$/ : /^[\w.-]+$/;
+  const safeIds = [...new Set(jobIds.filter(id => idPattern.test(id)))];
   if (safeIds.length === 0) return {};
   let command: string;
   if (scheduler === 'slurm') {
     command = `squeue -h -j ${safeIds.join(',')} -o "%A %T" 2>/dev/null; sacct -n -X -j ${safeIds.join(',')} -o JobIDRaw,State 2>/dev/null; true`;
   } else if (scheduler === 'pbs') {
     command = `qstat ${safeIds.join(' ')} 2>/dev/null; true`;
+  } else if (scheduler === 'donau') {
+    command = `${safeIds.map(id => `djob ${id}`).join('; ')} 2>/dev/null; true`;
   } else {
     command = `bjobs -a -noheader -o "jobid stat" ${safeIds.join(' ')} 2>/dev/null; true`;
   }
   const output = await exec(command, 15_000).catch(() => '');
   const states: Record<string, string> = {};
   for (const line of String(output || '').split(/\r?\n/)) {
-    const match = line.trim().match(/^(\d+(?:[._-]\d+)?)\s+([A-Za-z_]+)/);
+    const trimmed = line.trim();
+    const match = scheduler === 'pbs'
+      ? trimmed.match(/^([\w.-]+)\s+\S+\s+\S+\s+\S+\s+([A-Za-z])(?:\s|$)/)
+      : scheduler === 'donau'
+        ? trimmed.match(/^(\d+)\s+\S+\s+\S+\s+([A-Za-z_]+)(?:\s|$)/)
+        : trimmed.match(/^(\d+(?:[._-]\d+)?)\s+([A-Za-z_]+)/);
     if (match) states[match[1]] = match[2].toUpperCase();
   }
   return states;

@@ -158,17 +158,18 @@ export function parseQuotaOutput(raw: string): QuotaInfo | null {
 }
 
 // 快照按调度器选命令:LSF bjobs/bqueues、Slurm squeue/sinfo、PBS qstat、Donau djob/dqueue、无调度器跳过。
-type SnapshotScheduler = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+type SnapshotScheduler = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
 const SNAPSHOT_JOB_QUEUE_COMMANDS: Record<SnapshotScheduler, { jobs: string; queues: string }> = {
   lsf: { jobs: 'bjobs -w 2>/dev/null | head -30', queues: 'bqueues 2>/dev/null | head -20' },
   slurm: { jobs: 'squeue -u "$(whoami)" 2>/dev/null | head -30', queues: 'sinfo -s 2>/dev/null | head -20' },
   pbs: { jobs: 'qstat -u "$(whoami)" 2>/dev/null | head -30', queues: 'qstat -q 2>/dev/null | head -20' },
   donau: { jobs: 'djob 2>/dev/null | head -30', queues: 'dqueue 2>/dev/null | head -20' },
   none: { jobs: 'true', queues: 'true' },
+  unknown: { jobs: 'true', queues: 'true' },
 };
 
 function snapshotScheduler(scheduler?: string): SnapshotScheduler {
-  return scheduler === 'slurm' || scheduler === 'pbs' || scheduler === 'donau' || scheduler === 'none' ? scheduler : 'lsf';
+  return scheduler === 'slurm' || scheduler === 'pbs' || scheduler === 'donau' || scheduler === 'none' || scheduler === 'unknown' ? scheduler : 'lsf';
 }
 
 function buildSnapshotCommand(depth: SnapshotDepth, scheduler?: string): string {
@@ -199,7 +200,7 @@ function parseSnapshotOutput(raw: string, scheduler?: string): ClusterSnapshot {
   const jobs = sched === 'slurm' ? parseSqueueOutput(sections['jobs'] ?? '')
     : sched === 'pbs' ? parseQstatOutput(sections['jobs'] ?? '')
     : sched === 'donau' ? parseDjobOutput(sections['jobs'] ?? '')
-    : sched === 'none' ? []
+    : sched === 'none' || sched === 'unknown' ? []
     : parseBjobsOutput(sections['jobs'] ?? '');
   const quota = parseQuotaOutput(sections['quota'] ?? '');
   const modulesStr = sections['modules'] ?? '';
@@ -388,7 +389,8 @@ function normalizePbsStatus(letter: string): JobEntry['status'] {
   const s = letter.trim().toUpperCase();
   if (s === 'R' || s === 'E') return 'RUN';
   if (s === 'Q' || s === 'H' || s === 'W' || s === 'T' || s === 'S') return 'PEND';
-  if (s === 'C' || s === 'F') return 'DONE';
+  // C/F 没有 Exit_status，必须保持 UNKNOWN 并由 qstat -x -f 补查。
+  if (s === 'C' || s === 'F') return 'UNKNOWN';
   return 'UNKNOWN';
 }
 

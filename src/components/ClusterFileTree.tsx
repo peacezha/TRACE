@@ -65,7 +65,7 @@ function sortEntries(entries: FileEntry[]): FileEntry[] {
 }
 
 export default function ClusterFileTree({
-  sessionId,
+  sessionId: requestedSessionId,
   home = '/',
   selectedPath,
   onSelect,
@@ -74,6 +74,7 @@ export default function ClusterFileTree({
   onConfirmPick,
   onCancelPick,
 }: ClusterFileTreeProps) {
+  const sessionId = requestedSessionId === 'local-workbench' ? null : requestedSessionId;
   const rootPath = home || '/';
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([rootPath]));
   const [children, setChildren] = useState<Record<string, FileEntry[]>>({});

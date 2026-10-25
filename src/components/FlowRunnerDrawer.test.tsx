@@ -35,6 +35,7 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function makeWorkflow(overrides: Partial<Workflow> = {}): Workflow {
@@ -303,6 +304,29 @@ describe('FlowRunnerDrawer', () => {
   it('无会话时运行按钮禁用', () => {
     render(<FlowRunnerDrawer workflow={makeWorkflow()} sessionId={null} onClose={() => {}} onRun={() => {}} />);
     expect(screen.getByText('运行流程').closest('button')).toBeDisabled();
+  });
+
+  it('本地工作台明确提示需要计算资源并提供连接入口', () => {
+    const onConnectCompute = vi.fn();
+    render(<FlowRunnerDrawer workflow={makeWorkflow()} sessionId="local-workbench" onClose={() => {}} onRun={() => {}} onConnectCompute={onConnectCompute} />);
+    expect(screen.getByText(/流程运行需要计算资源/)).toBeInTheDocument();
+    expect(screen.getByText('运行流程').closest('button')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '连接计算资源' }));
+    expect(onConnectCompute).toHaveBeenCalledOnce();
+  });
+
+  it('配置有修改时恢复默认必须确认，取消不会清空输入', () => {
+    vi.stubGlobal('confirm', vi.fn(() => false));
+    render(<FlowRunnerDrawer workflow={makeWorkflow()} onClose={() => {}} onRun={() => {}} />);
+    const input = screen.getByPlaceholderText('或手动输入计算资源路径后回车');
+    fireEvent.change(input, { target: { value: '/data/fastq' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: '恢复默认' }));
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(screen.getByText('/data/fastq')).toBeInTheDocument();
+    vi.mocked(window.confirm).mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: '恢复默认' }));
+    expect(screen.queryByText('/data/fastq')).not.toBeInTheDocument();
   });
 
   it('运行记录可以打开集群目录并从 revision 断点继续', async () => {

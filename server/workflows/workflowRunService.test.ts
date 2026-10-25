@@ -224,12 +224,13 @@ describe('workflowRunService', () => {
     } satisfies WorkflowRun;
     const exec = async (command: string) => {
       if (command.startsWith(`cat '${runDir}/run.json'`)) return JSON.stringify(stored);
+      if (command.includes('bjobs -a')) return 'DONE';
       const encoded = command.match(/printf %s '([^']+)' \| base64 -d/)?.[1];
       if (encoded) stored = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
       return '';
     };
 
-    const restarted = await updateWorkflowRun(exec, '/home/u', runDir, { restartFromStep: 2 });
+    const restarted = await updateWorkflowRun(exec, '/home/u', runDir, { restartFromStep: 2 }, { scheduler: 'lsf' });
 
     expect(restarted.status).toBe('running');
     expect(restarted.currentStep).toBe(2);
@@ -241,6 +242,71 @@ describe('workflowRunService', () => {
     expect(restarted.jobStates).toEqual({});
     expect(restarted.reportPath).toBeUndefined();
     expect(restarted.endedAt).toBeUndefined();
+  });
+
+  it('RUN/PEND/UNKNOWN 作业禁止重跑且不清空任何状态', async () => {
+    for (const schedulerState of ['RUN', 'PEND', 'UNKNOWN'] as const) {
+      const runDir = `/home/u/trace_flows/wf/03_workspace/runs/reject-${schedulerState}`;
+      const stored = {
+        runId: 'r', workflowId: 'wf', workflowName: 'W', workflowVersion: 1, revision: 1,
+        runDir, status: 'running', startedAt: 1, updatedAt: 1, heartbeatAt: 1,
+        currentStep: 1, totalSteps: 1, config: sanitizeRunConfig({}),
+        steps: [{ n: 1, stepId: 's1', title: 'S', status: 'running', jobIds: ['123'], summary: 'keep' }],
+        jobStates: { '123': schedulerState },
+      } satisfies WorkflowRun;
+      const before = JSON.stringify(stored);
+      const exec = async (command: string) => {
+        if (command.startsWith(`cat '${runDir}/run.json'`)) return JSON.stringify(stored);
+        if (command.includes('bjobs -a')) return schedulerState === 'UNKNOWN' ? '' : schedulerState;
+        throw new Error('状态拒绝后不应写入');
+      };
+      await expect(updateWorkflowRun(exec, '/home/u', runDir, { restartFromStep: 1 }, { scheduler: 'lsf' }))
+        .rejects.toThrow('RUN/PEND/UNKNOWN');
+      expect(JSON.stringify(stored)).toBe(before);
+    }
+  });
+
+  it('重跑涉及作业但未传 scheduler 时 fail closed', async () => {
+    const runDir = '/home/u/trace_flows/wf/03_workspace/runs/no-scheduler';
+    const stored = {
+      runId: 'r', workflowId: 'wf', workflowName: 'W', workflowVersion: 1, revision: 1,
+      runDir, status: 'done', startedAt: 1, updatedAt: 1, heartbeatAt: 1,
+      currentStep: 1, totalSteps: 1, config: sanitizeRunConfig({}),
+      steps: [{ n: 1, stepId: 's1', title: 'S', status: 'done', jobIds: ['123'], summary: 'keep' }],
+    } satisfies WorkflowRun;
+    const exec = async () => JSON.stringify(stored);
+    await expect(updateWorkflowRun(exec, '/home/u', runDir, { restartFromStep: 1 }))
+      .rejects.toThrow('当前调度器无法核实');
+    expect(stored.steps[0].status).toBe('done');
+  });
+
+  it('取消前核实全部作业，活跃时拒绝，全部终态后才标记 cancelled', async () => {
+    const runDir = '/home/u/trace_flows/wf/03_workspace/runs/cancel-1';
+    let secondState = 'RUN';
+    const stored = {
+      runId: 'r', workflowId: 'wf', workflowName: 'W', workflowVersion: 1, revision: 1,
+      runDir, status: 'running', startedAt: 1, updatedAt: 1, heartbeatAt: 1,
+      currentStep: 2, totalSteps: 2, config: sanitizeRunConfig({}),
+      steps: [
+        { n: 1, stepId: 's1', title: 'S1', status: 'done', jobIds: ['123'], summary: 'done' },
+        { n: 2, stepId: 's2', title: 'S2', status: 'running', jobIds: ['456'] },
+      ],
+    } satisfies WorkflowRun;
+    const exec = async (command: string) => {
+      if (command.startsWith(`cat '${runDir}/run.json'`)) return JSON.stringify(stored);
+      if (command.includes('bjobs -a') && command.includes(' 123 ')) return 'DONE';
+      if (command.includes('bjobs -a') && command.includes(' 456 ')) return secondState;
+      const encoded = command.match(/printf %s '([^']+)' \| base64 -d/)?.[1];
+      if (encoded) Object.assign(stored, JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')));
+      return '';
+    };
+    await expect(updateWorkflowRun(exec, '/home/u', runDir, { status: 'cancelled' }, { scheduler: 'lsf' }))
+      .rejects.toThrow('456=RUN');
+    expect(stored.status).toBe('running');
+    secondState = 'EXIT';
+    const cancelled = await updateWorkflowRun(exec, '/home/u', runDir, { status: 'cancelled' }, { scheduler: 'lsf' });
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.steps[1].status).toBe('running');
   });
 
   it('DAG 分支只等待声明的依赖，不被无关的前序步骤阻塞', async () => {

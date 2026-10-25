@@ -6,6 +6,7 @@ import type { SftpFileService } from '../files/sftpFileService';
 function makeFakeService() {
   const files = new Map<string, string>();
   const dirs = new Set<string>();
+  const modes = new Map<string, number>();
   const service = {
     async mkdir(dir: string) {
       if (dirs.has(dir)) throw new Error('mkdir: File exists');
@@ -36,8 +37,11 @@ function makeFakeService() {
       if (!files.delete(p)) throw new Error('No such file');
       return { removed: 1 };
     },
+    async chmod(p: string, mode: number) {
+      modes.set(p, mode);
+    },
   };
-  return { files, dirs, service: service as unknown as SftpFileService };
+  return { files, dirs, modes, service: service as unknown as SftpFileService };
 }
 
 const HOME = '/home/tester';
@@ -64,14 +68,17 @@ describe('ClusterConversationStore', () => {
     await store.remove('old-1'); expect(await store.list()).toEqual([]); expect(await store.get('old-1')).toBeUndefined();
   });
 
-  it('save 后可 get 读取完整记录，且文件写入集群目录', async () => {
-    const { files, service } = makeFakeService();
+  it('save 后可 get 读取完整记录，且所有模式均限制目录和文件权限', async () => {
+    const { files, modes, service } = makeFakeService();
     const store = new ClusterConversationStore(service, HOME);
     await store.save(sample('abc-1'));
     const record = await store.get('abc-1');
     expect(record?.title).toBe('测试对话');
     expect(files.has(`${HOME}/trace_conversations/abc-1.json`)).toBe(true);
     expect(files.has(`${HOME}/trace_conversations/index.json`)).toBe(true);
+    expect(modes.get(`${HOME}/trace_conversations`)).toBe(0o700);
+    expect(modes.get(`${HOME}/trace_conversations/abc-1.json`)).toBe(0o600);
+    expect(modes.get(`${HOME}/trace_conversations/index.json`)).toBe(0o600);
   });
 
   it('list 返回摘要（倒序），不含消息体', async () => {

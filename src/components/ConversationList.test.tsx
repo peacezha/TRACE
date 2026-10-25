@@ -119,4 +119,46 @@ describe('ConversationList 双来源合并', () => {
     expect(onLoad).toHaveBeenCalledWith('conv-local', undefined);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/import'))).toBe(false);
   });
+
+  it('删除前确认包含标题，取消确认不发请求', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    renderList();
+    await screen.findByText('本地对话');
+    fireEvent.click(within(rowOf('本地对话')).getByTitle('删除'));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('本地对话'));
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+    expect(screen.getByText('本地对话')).toBeInTheDocument();
+  });
+
+  it('任意 HTTP 删除失败都保留条目并显示错误', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'DELETE') return jsonResponse({ success: false, error: 'permission denied' }, 500);
+      if (url.startsWith('/api/conversations?')) return jsonResponse({ success: true, conversations: [localConv] });
+      if (url === '/api/conversations/cluster') return clusterHandler();
+      return jsonResponse({ success: false }, 404);
+    });
+    renderList();
+    await screen.findByText('本地对话');
+    fireEvent.click(within(rowOf('本地对话')).getByTitle('删除'));
+    expect(await screen.findByText('permission denied')).toBeInTheDocument();
+    expect(screen.getByText('本地对话')).toBeInTheDocument();
+  });
+
+  it('只有删除成功后才从列表移除', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'DELETE') return jsonResponse({ success: true });
+      if (url.startsWith('/api/conversations?')) return jsonResponse({ success: true, conversations: [localConv] });
+      if (url === '/api/conversations/cluster') return clusterHandler();
+      return jsonResponse({ success: false }, 404);
+    });
+    renderList();
+    await screen.findByText('本地对话');
+    fireEvent.click(within(rowOf('本地对话')).getByTitle('删除'));
+    await waitFor(() => expect(screen.queryByText('本地对话')).not.toBeInTheDocument());
+  });
 });

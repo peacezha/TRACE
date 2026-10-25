@@ -8,6 +8,7 @@ import type {
   TransferDirection,
   ConflictPolicy,
   VerificationMode,
+  TransferSourceFingerprint,
 } from '../../shared/fileTransfer';
 import { canTransitionTransfer } from '../../shared/fileTransfer';
 import { saveTasks } from './transferStore';
@@ -19,6 +20,8 @@ import { saveTasks } from './transferStore';
 export interface TransferAdapter {
   remoteSize(remotePath: string, sessionId: string): Promise<number>;
   localSize(localPath: string): Promise<number>;
+  remoteFingerprint(remotePath: string, sessionId: string): Promise<TransferSourceFingerprint>;
+  localFingerprint(localPath: string): Promise<TransferSourceFingerprint>;
   openLocalRead(localPath: string, offset: number): Readable;
   openRemoteWrite(remotePath: string, offset: number, sessionId: string): Writable;
   openRemoteRead(remotePath: string, offset: number, sessionId: string): Readable;
@@ -28,6 +31,13 @@ export interface TransferAdapter {
     referencePath: string,
     mode: VerificationMode,
     context: { direction: TransferDirection; sessionId: string },
+  ): Promise<void>;
+  /** 双远端校验；sha256 模式缺少此能力时必须失败，禁止降级成 size。 */
+  verifyRemoteCopy?(
+    sourcePath: string,
+    destinationPath: string,
+    mode: VerificationMode,
+    context: { sourceSessionId: string; destinationSessionId: string },
   ): Promise<void>;
   remoteRename(from: string, to: string, sessionId: string): Promise<void>;
   localRename(from: string, to: string): Promise<void>;
@@ -44,20 +54,6 @@ export interface TransferAdapter {
     sourceSessionId: string;
     destinationSessionId: string;
   }): Promise<void>;
-  /** ssh2 fastPut 并行块上传（非断点续传的全新上传用）；缺失时回退单流 pipeline */
-  fastPut?(
-    localPath: string,
-    remotePath: string,
-    sessionId: string,
-    onProgress: (transferred: number) => void,
-  ): Promise<void>;
-  /** ssh2 fastGet 并行块下载（非断点续传的全新下载用）；缺失时回退单流 pipeline */
-  fastGet?(
-    remotePath: string,
-    localPath: string,
-    sessionId: string,
-    onProgress: (transferred: number) => void,
-  ): Promise<void>;
   /**
    * 会话保活：会话在且 connected → true；已知但断开 → 尝试静默重连，成功 true 失败 false；
    * 完全未知的会话 → false。注入后引擎在每个传输阶段开始前调用，
@@ -198,6 +194,8 @@ if __name__ == '__main__':
 interface RunningTask {
   controller: AbortController;
   sessionId: string;
+  /** 包含 executeTransfer 及执行额度结算；pause/cancel 必须等待它。 */
+  done: Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +244,25 @@ export class TransferEngine {
     return task;
   }
 
+  /** 新建任务时固定源 size/mtime，防止把另一个同名文件续接到旧 .part。 */
+  async enqueueWithSourceFingerprint(
+    input: Omit<TransferTask, 'id' | 'state' | 'createdAt' | 'updatedAt' | 'bytesPerSecond'>,
+    sessionId: string,
+  ): Promise<TransferTask> {
+    const sourceFingerprint = input.direction === 'upload'
+      ? await this.adapter.localFingerprint(input.localPath)
+      : await this.adapter.remoteFingerprint(
+          input.remotePath,
+          input.direction === 'remote-copy' ? input.sourceSessionId! : sessionId,
+        );
+    return this.enqueue({
+      ...input,
+      sourceFingerprint,
+      totalBytes: sourceFingerprint.size,
+      transferredBytes: 0,
+    });
+  }
+
   list(): TransferTask[] {
     return [...this.tasks.values()];
   }
@@ -277,44 +294,34 @@ export class TransferEngine {
     }
 
     const run = this.running.get(id);
-    if (run) {
-      run.controller.abort();
-      this.running.delete(id);
-      this.activeCount = Math.max(0, this.activeCount - 1);
-    }
-
     task.state = 'paused';
     task.bytesPerSecond = 0;
     task.updatedAt = Date.now();
     this.emitTaskUpdated(task);
     void this.persist();
-    this.checkIdle();
-    this.processQueue();
+
+    if (run) {
+      run.controller.abort();
+      // 不在此处结算 activeCount：只有本轮 I/O 的 finally 能结算。
+      await run.done;
+    } else {
+      this.checkIdle();
+      this.processQueue();
+    }
   }
 
   async resume(id: string, sessionId: string): Promise<void> {
     const task = this.tasks.get(id);
     if (!task) throw new Error('Task not found');
 
-    if (task.state === 'running') {
-      task.sessionId = sessionId;
-      task.updatedAt = Date.now();
+    if (task.state === 'running' || task.state === 'retrying') {
+      // 原执行仍持有流/退避定时器，不能再启动第二轮或跨会话换绑。
+      if (task.sessionId !== sessionId) throw new Error('Cannot rebind an active transfer');
       return;
     }
 
     if (task.state === 'completed' || task.state === 'cancelled') {
       throw new Error(`Cannot resume from state ${task.state}`);
-    }
-
-    if (task.state === 'retrying') {
-      // State machine allows retrying -> running directly
-      task.state = 'running';
-      task.sessionId = sessionId;
-      task.updatedAt = Date.now();
-      this.emitTaskUpdated(task);
-      this.startTask(id);
-      void this.persist();
-      return;
     }
 
     // queued / paused / failed -> transition to queued, start or queue
@@ -348,20 +355,18 @@ export class TransferEngine {
     }
 
     const run = this.running.get(id);
-    if (run) {
-      run.controller.abort();
-      this.running.delete(id);
-      this.activeCount = Math.max(0, this.activeCount - 1);
-    }
-
-    // Clean up temporary files
-    await this.cleanupTempFile(task);
-
     task.state = 'cancelled';
     task.bytesPerSecond = 0;
     task.updatedAt = Date.now();
     this.emitTaskUpdated(task);
     void this.persist();
+
+    if (run) {
+      run.controller.abort();
+      await run.done;
+    }
+    // 只有底层 pipeline/直连进程退出后才能删除 .part，避免迟到的写句柄重建文件。
+    await this.cleanupTempFile(task);
     this.checkIdle();
     this.processQueue();
   }
@@ -409,14 +414,12 @@ export class TransferEngine {
   }
 
   setConcurrency(value: number): void {
-    // 并发上限 8：fastPut/fastGet 单任务已是多路并发块，任务级并发不宜再高
     this.concurrency = Math.max(1, Math.min(8, Math.trunc(value)));
     this.processQueue();
   }
 
   setBandwidthLimit(_bytesPerSecond: number | null): void {
-    // Bandwidth throttling is reserved for future use.
-    // A PassThrough-based throttle can be inserted in the pipeline when needed.
+    throw new Error('Bandwidth limit is not implemented');
   }
 
   async waitForIdle(): Promise<void> {
@@ -427,12 +430,10 @@ export class TransferEngine {
   }
 
   async shutdown(): Promise<void> {
-    for (const [, run] of this.running) {
-      run.controller.abort();
-    }
-    this.running.clear();
+    const runs = [...this.running.values()];
+    for (const run of runs) run.controller.abort();
     this.queue = [];
-    this.activeCount = 0;
+    await Promise.all(runs.map(run => run.done));
     this.tasks.clear();
   }
 
@@ -461,20 +462,23 @@ export class TransferEngine {
 
     this.activeCount++;
     const controller = new AbortController();
-    this.running.set(id, { controller, sessionId: task.sessionId! });
+    const run: RunningTask = {
+      controller,
+      sessionId: task.sessionId!,
+      done: Promise.resolve(),
+    };
+    this.running.set(id, run);
 
-    this.executeTransfer(id, controller)
-        .catch(() => { /* errors handled inside */ })
-        .finally(() => {
-          // pause/cancel 已把任务从 running 移除并结算过额度；被中止的执行晚落地时
-          // 只对仍在册的本轮执行结算，否则重复扣减 activeCount 会让 waitForIdle 提前放行
-          if (this.running.get(id)?.controller === controller) {
-            this.running.delete(id);
-            this.activeCount = Math.max(0, this.activeCount - 1);
-          }
-          this.checkIdle();
-          this.processQueue();
-        });
+    run.done = this.executeTransfer(id, controller)
+      .catch(() => { /* errors handled inside */ })
+      .finally(() => {
+        if (this.running.get(id)?.controller === controller) {
+          this.running.delete(id);
+          this.activeCount = Math.max(0, this.activeCount - 1);
+        }
+        this.checkIdle();
+        this.processQueue();
+      });
   }
 
   // -----------------------------------------------------------------------
@@ -490,6 +494,7 @@ export class TransferEngine {
       // 每个阶段开始前先确认会话存活（注入 ensureSessionAlive 时断开会话会被静默重连），
       // 避免几小时的大文件传输因中途断线/会话被淘汰而直接失败
       await this.ensureTaskSessionsAlive(task);
+      await this.validateSourceFingerprint(task);
       if (task.direction === 'remote-copy' && this.adapter.prepareRemoteCopy) {
         await this.adapter.prepareRemoteCopy({
           sourcePath: task.remotePath,
@@ -502,6 +507,7 @@ export class TransferEngine {
       const directDone = task.direction === 'remote-copy'
         ? await this.tryDirectCopy(id, signal)
         : false;
+      if (signal.aborted) return;
 
       if (!directDone) {
         // Phase 1: stream the file data
@@ -511,12 +517,7 @@ export class TransferEngine {
         // Phase 2: verify the temporary file
         await this.ensureTaskSessionsAlive(task);
         if (task.direction === 'remote-copy') {
-          // 两端都是远端：源集群与目标集群临时文件做 size 校验
-          const [srcSize, dstSize] = await Promise.all([
-            this.adapter.remoteSize(task.remotePath, task.sourceSessionId!),
-            this.adapter.remoteSize(task.temporaryPath, task.sessionId!),
-          ]);
-          if (srcSize !== dstSize) throw new Error('size mismatch');
+          await this.verifyRemoteCopy(task);
         } else {
           const verifyLocal = task.direction === 'upload' ? task.localPath : task.temporaryPath;
           const verifyRemote = task.direction === 'upload' ? task.temporaryPath : task.remotePath;
@@ -527,8 +528,9 @@ export class TransferEngine {
         }
         if (signal.aborted) return;
 
-        // Phase 3: atomic rename
+        // Phase 3: atomic rename。保活/重连也可耗时，等待结束必须再次响应取消。
         await this.ensureTaskSessionsAlive(task);
+        if (signal.aborted) return;
         if (task.direction === 'upload') {
           await this.adapter.remoteRename(task.temporaryPath, task.remotePath, task.sessionId!);
         } else if (task.direction === 'remote-copy') {
@@ -538,6 +540,7 @@ export class TransferEngine {
           await this.adapter.localRename(task.temporaryPath, task.localPath);
         }
       }
+      if (signal.aborted) return;
 
       task.state = 'completed';
       task.transferredBytes = task.totalBytes;
@@ -611,6 +614,48 @@ export class TransferEngine {
     }
   }
 
+  private async validateSourceFingerprint(task: TransferTask): Promise<void> {
+    const expected = task.sourceFingerprint;
+    if (!expected) return; // 兼容 v0.5.13 及更早的持久记录
+    const actual = task.direction === 'upload'
+      ? await this.adapter.localFingerprint(task.localPath)
+      : await this.adapter.remoteFingerprint(
+          task.remotePath,
+          task.direction === 'remote-copy' ? task.sourceSessionId! : task.sessionId!,
+        );
+    if (actual.size !== expected.size || actual.mtime !== expected.mtime) {
+      throw new Error(
+        `Source file changed since transfer creation; refusing resume `
+        + `(expected size=${expected.size}, mtime=${expected.mtime}; `
+        + `actual size=${actual.size}, mtime=${actual.mtime})`,
+      );
+    }
+  }
+
+  private async verifyRemoteCopy(task: TransferTask): Promise<void> {
+    const context = {
+      sourceSessionId: task.sourceSessionId!,
+      destinationSessionId: task.sessionId!,
+    };
+    if (this.adapter.verifyRemoteCopy) {
+      await this.adapter.verifyRemoteCopy(
+        task.remotePath,
+        task.temporaryPath,
+        task.verificationMode,
+        context,
+      );
+      return;
+    }
+    if (task.verificationMode === 'sha256') {
+      throw new Error('remote-copy sha256 verification is unavailable');
+    }
+    const [srcSize, dstSize] = await Promise.all([
+      this.adapter.remoteSize(task.remotePath, context.sourceSessionId),
+      this.adapter.remoteSize(task.temporaryPath, context.destinationSessionId),
+    ]);
+    if (srcSize !== dstSize) throw new Error('size mismatch');
+  }
+
   private async streamFile(id: string, signal: AbortSignal): Promise<void> {
     const task = this.tasks.get(id);
     if (!task) return;
@@ -630,19 +675,10 @@ export class TransferEngine {
     const destSessionId = task.sessionId!;
     const sourceSessionId = task.sourceSessionId!;
 
-    let offset = task.transferredBytes;
-
-    // For resume, check destination temporary file size
-    if (task.conflictPolicy === 'resume' && offset > 0) {
-      try {
-        const remoteSize = await this.adapter.remoteSize(task.temporaryPath, destSessionId);
-        offset = remoteSize;
-        task.transferredBytes = remoteSize;
-      } catch {
-        offset = 0;
-        task.transferredBytes = 0;
-      }
-    }
+    const offset = task.conflictPolicy === 'resume'
+      ? await this.reconcileRemotePart(task, destSessionId)
+      : 0;
+    task.transferredBytes = offset;
 
     const readStream = this.adapter.openRemoteRead(task.remotePath, offset, sourceSessionId);
     const writeStream = this.adapter.openRemoteWrite(task.temporaryPath, offset, destSessionId);
@@ -887,6 +923,7 @@ export class TransferEngine {
 
     const launcher = `${preClean}rm -f ${TransferEngine.sq(logPath)}; nohup sh -c ${TransferEngine.sq(transferCmd)} > ${TransferEngine.sq(logPath)} 2>&1 & echo $!`;
 
+    if (signal.aborted) return true;
     let pid: string;
     try {
       pid = (await exec(launcher, workSid, 15_000)).trim().split('\n').pop() || '';
@@ -895,16 +932,27 @@ export class TransferEngine {
       return false; // 启动都失败就回退中转
     }
 
-    // 取消/暂停时杀掉传输进程
-    const onAbort = () => { void exec(`kill ${pid} 2>/dev/null; true`, workSid, 10_000).catch(() => {}); };
+    // 取消/暂停时杀掉传输进程，并由 run.done 等待 kill 请求完成。
+    let abortDone = Promise.resolve();
+    const onAbort = () => {
+      abortDone = exec(`kill ${pid} 2>/dev/null; true`, workSid, 10_000)
+        .then(() => undefined)
+        .catch(() => {});
+    };
     signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    const waitIfAborted = async (): Promise<boolean> => {
+      if (!signal.aborted) return false;
+      await abortDone;
+      return true;
+    };
 
     try {
       // 轮询：进程存活 + 目标端临时文件大小 → 进度与速度（差值/间隔）
       let lastPollBytes = task.transferredBytes;
       let lastPollTime = Date.now();
       for (;;) {
-        if (signal.aborted) return true; // 中止时静默退出（状态由外层设置）
+        if (await waitIfAborted()) return true;
         await new Promise(r => setTimeout(r, 2000));
         let alive = false;
         try {
@@ -923,31 +971,21 @@ export class TransferEngine {
         if (!alive) break;
       }
 
-      if (signal.aborted) return true;
+      if (await waitIfAborted()) return true;
 
-      // 校验：两端 size 一致才算成功；失败/临时文件缺失时带上传输日志尾部便于定位
-      let srcSize = 0;
-      let dstSize = 0;
       try {
-        [srcSize, dstSize] = await Promise.all([
-          this.adapter.remoteSize(task.remotePath, src),
-          this.adapter.remoteSize(task.temporaryPath, dst),
-        ]);
-      } catch (e: any) {
+        await this.verifyRemoteCopy(task);
+      } catch (error) {
         let tail = '';
         try {
           tail = (await exec(`tail -6 ${TransferEngine.sq(logPath)} 2>/dev/null; true`, workSid, 10_000)).trim();
         } catch { /* ignore */ }
-        throw new Error(`${e?.message || String(e)}${tail ? `；传输日志: ${tail.slice(-220)}` : ''}`);
-      }
-      if (srcSize !== dstSize) {
-        let tail = '';
-        try {
-          tail = (await exec(`tail -6 ${TransferEngine.sq(logPath)} 2>/dev/null; true`, workSid, 10_000)).trim();
-        } catch { /* ignore */ }
-        throw new Error(`size mismatch (direct: ${srcSize} != ${dstSize})${tail ? `；传输日志: ${tail.slice(-200)}` : ''}`);
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`${message}${tail ? `；传输日志: ${tail.slice(-220)}` : ''}`);
       }
 
+      // 校验可能耗时很长；最终改名前再次响应取消，避免 cancelled 仍覆盖目标。
+      if (await waitIfAborted()) return true;
       await this.adapter.remoteRename(task.temporaryPath, task.localPath, dst);
       return true;
     } finally {
@@ -1007,38 +1045,14 @@ export class TransferEngine {
   private async uploadFile(id: string, signal: AbortSignal): Promise<void> {
     const task = this.tasks.get(id)!;
     const sessionId = task.sessionId!;
-
-    let offset = task.transferredBytes;
-
-    // For resume, check remote temporary file size
-    if (task.conflictPolicy === 'resume' && offset > 0) {
-      try {
-        const remoteSize = await this.adapter.remoteSize(task.temporaryPath, sessionId);
-        offset = remoteSize;
-        task.transferredBytes = remoteSize;
-      } catch {
-        offset = 0;
-        task.transferredBytes = 0;
-      }
-    }
-
-    // 全新上传（非断点续传）优先走 fastPut：64 路并发块，
-    // 吞吐远高于单流 64KB 一问一答；.part + 原子 rename 由外层保证，不变
-    if (offset === 0 && this.adapter.fastPut) {
-      await this.adapter.fastPut(
-        task.localPath,
-        task.temporaryPath,
-        sessionId,
-        this.createProgressTracker(task, 0),
-      );
-      task.updatedAt = Date.now();
-      return;
-    }
+    const offset = task.conflictPolicy === 'resume'
+      ? await this.reconcileRemotePart(task, sessionId)
+      : 0;
+    task.transferredBytes = offset;
 
     const readStream = this.adapter.openLocalRead(task.localPath, offset);
     const writeStream = this.adapter.openRemoteWrite(task.temporaryPath, offset, sessionId);
     const counter = this.progressCounter(task, offset);
-
     await pipeline(readStream, counter, writeStream, { signal });
     task.updatedAt = Date.now();
   }
@@ -1046,39 +1060,50 @@ export class TransferEngine {
   private async downloadFile(id: string, signal: AbortSignal): Promise<void> {
     const task = this.tasks.get(id)!;
     const sessionId = task.sessionId!;
-
-    let offset = task.transferredBytes;
-
-    // For resume, check local temporary file size
-    if (task.conflictPolicy === 'resume' && offset > 0) {
-      try {
-        const localSize = await this.adapter.localSize(task.temporaryPath);
-        offset = localSize;
-        task.transferredBytes = localSize;
-      } catch {
-        offset = 0;
-        task.transferredBytes = 0;
-      }
-    }
-
-    // 全新下载（非断点续传）优先走 fastGet 并行块通道
-    if (offset === 0 && this.adapter.fastGet) {
-      await this.adapter.fastGet(
-        task.remotePath,
-        task.temporaryPath,
-        sessionId,
-        this.createProgressTracker(task, 0),
-      );
-      task.updatedAt = Date.now();
-      return;
-    }
+    const offset = task.conflictPolicy === 'resume'
+      ? await this.reconcileLocalPart(task)
+      : 0;
+    task.transferredBytes = offset;
 
     const readStream = this.adapter.openRemoteRead(task.remotePath, offset, sessionId);
     const writeStream = this.adapter.openLocalWrite(task.temporaryPath, offset);
     const counter = this.progressCounter(task, offset);
-
     await pipeline(readStream, counter, writeStream, { signal });
     task.updatedAt = Date.now();
+  }
+
+  private async reconcileRemotePart(task: TransferTask, sessionId: string): Promise<number> {
+    try {
+      return this.checkedPartSize(task, await this.adapter.remoteSize(task.temporaryPath, sessionId));
+    } catch (error) {
+      if (this.isMissingPartError(error)) return 0;
+      throw error;
+    }
+  }
+
+  private async reconcileLocalPart(task: TransferTask): Promise<number> {
+    try {
+      return this.checkedPartSize(task, await this.adapter.localSize(task.temporaryPath));
+    } catch (error) {
+      if (this.isMissingPartError(error)) return 0;
+      throw error;
+    }
+  }
+
+  private isMissingPartError(error: unknown): boolean {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    return code === 2 || code === 'ENOENT' || /no such file|not found|does not exist/i.test(message);
+  }
+
+  private checkedPartSize(task: TransferTask, size: number): number {
+    if (!Number.isFinite(size) || size < 0) throw new Error('Invalid .part size');
+    if (task.totalBytes > 0 && size > task.totalBytes) {
+      throw new Error('.part is larger than the source file; restart with overwrite');
+    }
+    return size;
   }
 
   // -----------------------------------------------------------------------
@@ -1130,7 +1155,7 @@ export class TransferEngine {
     let bytesSoFar = initialOffset;
     const trackProgress = this.createProgressTracker(task, initialOffset);
 
-    const counter = new PassThrough();
+    const counter = new PassThrough({ highWaterMark: 512 * 1024 });
     counter.on('data', (chunk: Buffer) => {
       bytesSoFar += chunk.length;
       trackProgress(bytesSoFar);

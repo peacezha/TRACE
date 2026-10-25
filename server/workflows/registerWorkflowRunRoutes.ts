@@ -15,14 +15,15 @@ import {
 import type { WorkflowRunPatch } from '../../shared/workflowRun';
 import type { WorkflowRun } from '../../shared/workflowRun';
 import { qcPauseReason, unresolvedQcFailures } from '../../shared/workflowQc';
+import type { SchedulerKind } from '../cluster/schedulerProfile';
 
 export interface WorkflowRunSession {
   sessionId: string;
   exec: RunExec;
   home: string;
   sftp?: { fastPut: (localPath: string, remotePath: string, cb: (err?: Error) => void) => void };
-  /** 该集群登录探测到的调度器：步骤脚本的 #BSUB 指令按需翻译成 #SBATCH/#PBS（donau 暂按剥除处理） */
-  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+  /** 当前集群调度器：脚本翻译及重跑/取消前的作业状态核实共用。 */
+  scheduler?: SchedulerKind;
 }
 
 export type WorkflowRunChanged = (sessionId: string, run: WorkflowRun) => void;
@@ -105,7 +106,7 @@ export function registerWorkflowRunRoutes(
       if (!session) return sendError(res, 401, '需要活跃的 SSH 会话');
       const runDir = String(req.body?.runDir || '');
       const patch = (req.body?.patch || {}) as WorkflowRunPatch;
-      const run = await updateWorkflowRun(session.exec, session.home, runDir, patch);
+      const run = await updateWorkflowRun(session.exec, session.home, runDir, patch, { scheduler: session.scheduler });
       onRunChanged?.(session.sessionId, run);
       res.json({ success: true, run });
     } catch (err: any) {

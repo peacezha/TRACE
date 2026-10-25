@@ -14,7 +14,13 @@ import { assertRemotePathWithinRoot } from '../files/pathSafety';
 import { extractSubmittedJobIds, isSubmissionCommand } from './jobAgentBindings';
 import { getDshInteractionHandler, type DshBridgeBinding, type DshInteractionHandler } from './bridgeState';
 import { resolveWorkspaceFilePath } from './workspace';
-import { preflightJobSubmission, type JobSubmissionClaim, type JobSubmissionGuard } from '../ai/jobSubmissionGuard';
+import {
+  isDefiniteSubmissionRejection,
+  preflightJobSubmission,
+  SUBMISSION_UNKNOWN_GUIDANCE,
+  type JobSubmissionClaim,
+  type JobSubmissionGuard,
+} from '../ai/jobSubmissionGuard';
 import type { SchedulerKind } from '../cluster/schedulerProfile';
 
 export interface BridgeClusterSession {
@@ -266,8 +272,9 @@ export function registerBridgeRoutes(app: Express, deps: BridgeRouteDeps): void 
     const rawTimeout = Number(body.timeoutMs);
     const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 30_000;
     let submissionClaim: JobSubmissionClaim | undefined;
+    const submission = isSubmissionCommand(command);
     try {
-      if (isSubmissionCommand(command) && deps.jobSubmissionGuard) {
+      if (submission && deps.jobSubmissionGuard) {
         const preflight = await preflightJobSubmission(
           command,
           { conversationKey: binding.conversationKey },
@@ -298,6 +305,18 @@ export function registerBridgeRoutes(app: Express, deps: BridgeRouteDeps): void 
           });
           return;
         }
+        if (decision.kind === 'unknown') {
+          if (body.confirmed !== true) {
+            res.status(428).json({
+              error: 'confirmation_required',
+              code: 'submission_result_unknown',
+              risk: 'destructive',
+              message: SUBMISSION_UNKNOWN_GUIDANCE,
+            });
+            return;
+          }
+          submissionClaim = deps.jobSubmissionGuard.retryUnknown(decision.record);
+        }
         if (decision.kind === 'reuse') {
           const reusedOutput = decision.record.jobIds
             .map(jobId => `Job <${jobId}> is submitted. [IDEMPOTENT_REUSE: no new submission]`)
@@ -305,14 +324,20 @@ export function registerBridgeRoutes(app: Express, deps: BridgeRouteDeps): void 
           res.json({ ok: true, exitCode: 0, output: reusedOutput, reused: true });
           return;
         }
-        submissionClaim = decision.claim;
+        if (decision.kind === 'execute') submissionClaim = decision.claim;
       }
       const output = await session.cluster.exec(command, timeoutMs);
+      const jobIds = submission ? extractSubmittedJobIds(output) : [];
+      if (submission && jobIds.length === 0) {
+        if (submissionClaim) {
+          try { deps.jobSubmissionGuard?.markUnknown(submissionClaim); } catch { /* 保留原始提交结果 */ }
+        }
+        res.json({ ok: false, output: trunc(output), error: SUBMISSION_UNKNOWN_GUIDANCE, code: 'submission_result_unknown' });
+        return;
+      }
       if (submissionClaim) {
-        const jobIds = extractSubmittedJobIds(output);
         try {
-          if (jobIds.length > 0) deps.jobSubmissionGuard?.complete(submissionClaim, jobIds);
-          else deps.jobSubmissionGuard?.fail(submissionClaim);
+          deps.jobSubmissionGuard?.complete(submissionClaim, jobIds);
         } catch (ledgerError) {
           // 已有调度器回执时保持成功语义，避免 dsh 因本地落盘错误重试提交。
           console.error('[submit-guard] dsh 提交账本落盘失败:', ledgerError);
@@ -320,7 +345,6 @@ export function registerBridgeRoutes(app: Express, deps: BridgeRouteDeps): void 
       }
       // Return the submission receipt immediately; never wait for an HPC job
       // inside an Agent RPC with a shorter execution deadline.
-      const jobIds = isSubmissionCommand(command) ? extractSubmittedJobIds(output) : [];
       if (jobIds.length) {
         try { deps.onJobsSubmitted?.(binding, jobIds); } catch (error) {
           console.error('[dsh-bridge] watcher registration failed:', errText(error));
@@ -334,15 +358,23 @@ export function registerBridgeRoutes(app: Express, deps: BridgeRouteDeps): void 
       }
       res.json({ ok: true, exitCode: 0, output: trunc(output) });
     } catch (err) {
+      const rejected = submission && isDefiniteSubmissionRejection(err);
       if (submissionClaim) {
-        try { deps.jobSubmissionGuard?.fail(submissionClaim); } catch { /* 保留原始命令错误 */ }
+        try {
+          if (rejected) deps.jobSubmissionGuard?.fail(submissionClaim);
+          else deps.jobSubmissionGuard?.markUnknown(submissionClaim);
+        } catch { /* 保留原始命令错误 */ }
       }
+      const message = errText(err);
       // 执行失败也回 200：让 dsh 侧把错误信息当工具结果读出来，由模型自行调整。
       res.json({
         ok: false,
         exitCode: undefined,
         output: '',
-        error: errText(err),
+        error: submission
+          ? `${rejected ? '[调度器明确拒绝提交，尚未提交作业]' : `[${SUBMISSION_UNKNOWN_GUIDANCE}]`}\n${message}`
+          : message,
+        ...(submission ? { code: rejected ? 'submission_rejected' : 'submission_result_unknown' } : {}),
       });
     }
   });

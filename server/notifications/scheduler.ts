@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
-import { parseBjobsOutput, parseSqueueOutput, parseQstatOutput, parseDjobOutput } from '../ai/clusterContext';
+import { parseBjobsOutput, parseSqueueOutput, parseQstatOutput, parseDjobOutput, parseDjobFinalState } from '../ai/clusterContext';
 import type { JobEntry } from '../ai/types';
 import type { SchedulerKind } from '../cluster/schedulerProfile';
 
@@ -23,7 +23,7 @@ export async function loadSchedulerType(): Promise<SchedulerType> {
 }
 
 function normalizeScheduler(value: unknown): SchedulerType {
-  return value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' ? value : 'lsf';
+  return value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' || value === 'unknown' ? value : 'lsf';
 }
 
 export async function saveSchedulerType(scheduler: SchedulerType): Promise<void> {
@@ -49,6 +49,8 @@ const JOBS_COMMANDS: Record<SchedulerType, string> = {
   donau: `timeout ${REMOTE_POLL_TIMEOUT_S} djob 2>/dev/null`,
   // 无调度器：只能按当前用户进程近似
   none: 'true',
+  // 探测未知时禁止退回 LSF 或把空列表当作真实作业状态。
+  unknown: 'false',
 };
 
 export function jobsCommand(scheduler: SchedulerType): string {
@@ -103,7 +105,7 @@ export function parseJobsOutput(scheduler: SchedulerType, raw: string): JobEntry
   if (scheduler === 'slurm') return parseSqueueOutput(raw);
   if (scheduler === 'pbs') return parseQstatOutput(raw);
   if (scheduler === 'donau') return parseDjobOutput(raw);
-  if (scheduler === 'none') return [];
+  if (scheduler === 'none' || scheduler === 'unknown') return [];
   return parseBjobsOutput(raw);
 }
 
@@ -125,8 +127,65 @@ export function finalStateCommand(scheduler: SchedulerType, jobId: string): stri
   if (scheduler === 'slurm') return slurmFinalStateCommand(jobId);
   if (scheduler === 'pbs') return pbsFinalStateCommand(jobId);
   if (scheduler === 'donau') return donauFinalStateCommand(jobId);
-  if (scheduler === 'none') return 'false';
+  if (scheduler === 'none' || scheduler === 'unknown') return 'false';
   return lsfFinalStateCommand(jobId);
+}
+
+export type SchedulerJobState = 'RUN' | 'PEND' | 'DONE' | 'EXIT' | 'UNKNOWN';
+
+/** PBS C/F 只是结束外观；只有同一份 accounting 输出里的 Exit_status 能判定成败。 */
+export function parsePbsAccountingState(raw: string): SchedulerJobState {
+  const state = raw.match(/\bjob_state\s*=\s*([A-Z])\b/i)?.[1]?.toUpperCase();
+  if (state === 'R' || state === 'E') return 'RUN';
+  if (state === 'Q' || state === 'H' || state === 'W' || state === 'T' || state === 'S') return 'PEND';
+  if (state !== 'C' && state !== 'F') return 'UNKNOWN';
+  const exit = raw.match(/\bExit_status\s*=\s*(-?\d+)\b/i);
+  if (!exit) return 'UNKNOWN';
+  return Number(exit[1]) === 0 ? 'DONE' : 'EXIT';
+}
+
+export function parseSchedulerJobState(scheduler: SchedulerType, raw: string): SchedulerJobState {
+  if (scheduler === 'pbs') return parsePbsAccountingState(raw);
+  if (scheduler === 'donau') {
+    const final = parseDjobFinalState(raw);
+    if (final) return final;
+    if (/\bRUNNING\b/i.test(raw)) return 'RUN';
+    if (/\b(?:WAITING|PENDING)\b/i.test(raw)) return 'PEND';
+    return 'UNKNOWN';
+  }
+  const state = raw.trim().split(/\s+/)[0]?.toUpperCase() || '';
+  if (scheduler === 'slurm') {
+    if (state === 'RUNNING') return 'RUN';
+    if (/^(PENDING|CONFIGURING|SUSPENDED|COMPLETING)/.test(state)) return 'PEND';
+    if (state === 'COMPLETED') return 'DONE';
+    if (/^(FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|PREEMPTED|BOOT_FAIL|DEADLINE|REVOKED)(?:[+]|$)/.test(state)) return 'EXIT';
+    return 'UNKNOWN';
+  }
+  if (scheduler === 'lsf') {
+    if (state === 'RUN') return 'RUN';
+    if (state === 'PEND') return 'PEND';
+    if (state === 'DONE' || state === 'EXIT') return state;
+  }
+  return 'UNKNOWN';
+}
+
+/** 重跑/取消前按当前调度器逐 ID 核实；任何异常或缺失记录都保持 UNKNOWN。 */
+export async function querySchedulerJobStates(
+  exec: (command: string, timeoutMs?: number) => Promise<string>,
+  scheduler: SchedulerType | undefined,
+  jobIds: string[],
+): Promise<Record<string, SchedulerJobState>> {
+  const ids = [...new Set(jobIds)];
+  const entries = await Promise.all(ids.map(async jobId => {
+    if (!scheduler || scheduler === 'none' || scheduler === 'unknown') return [jobId, 'UNKNOWN'] as const;
+    try {
+      const raw = await exec(finalStateCommand(scheduler, jobId), 30_000);
+      return [jobId, parseSchedulerJobState(scheduler, raw)] as const;
+    } catch {
+      return [jobId, 'UNKNOWN'] as const;
+    }
+  }));
+  return Object.fromEntries(entries);
 }
 
 /** 各调度器的脚本提交命令；none 退化登录节点后台执行并回显 PID。 */
@@ -138,47 +197,81 @@ export function submitCommand(scheduler: SchedulerType, scriptPath: string): str
     // Donau：dsub -s 要求脚本有可执行权限
     case 'donau': return `chmod +x ${safe} && dsub -s ${safe}`;
     case 'none': return `nohup bash ${safe} > ${safe}.nohup.log 2>&1 & echo "NOHUP_PID:$!"`;
+    case 'unknown': throw new Error('调度器未知，禁止提交作业');
     default: return `bsub < ${safe}`;
   }
 }
 
-/** 流程模板的 #BSUB 指令翻译到目标调度器；none 直接剥掉。 */
+/** 流程模板的 #BSUB 指令翻译到目标调度器；不能无损翻译时必须拒绝创建/提交。 */
 export function translateSchedulerDirectives(script: string, target: SchedulerKind): string {
   if (target === 'lsf') return script;
-  const lines = script.split('\n');
+  if (target === 'unknown') throw new Error('调度器未知，不能安全翻译流程脚本');
   const out: string[] = [];
-  for (const line of lines) {
+  for (const line of script.split('\n')) {
     const match = line.match(/^\s*#BSUB\s+(.+)$/);
     if (!match) {
       out.push(line);
       continue;
     }
-    if (target === 'none' || target === 'donau') continue; // 无调度器：去掉调度指令；Donau 的 #DSUB 翻译未接入（流程模板部署暂不支持 donau），剥掉避免误带 #BSUB
-    const translated = translateBsubLine(match[1].trim(), target);
-    if (translated) out.push(translated);
+    if (target === 'none') continue;
+    out.push(translateBsubLine(match[1].trim(), target));
   }
   return out.join('\n');
 }
 
-function translateBsubLine(args: string, target: 'slurm' | 'pbs'): string | null {
+function lsfWalltime(value: string): string {
+  const match = value.match(/^(?:(\d+):)?(\d+)$/);
+  if (!match) throw new Error(`无法翻译 LSF walltime: ${value}`);
+  const hours = Number(match[1] ?? 0) + Math.floor(Number(match[2]) / 60);
+  const minutes = Number(match[2]) % 60;
+  if (match[1] !== undefined && Number(match[2]) >= 60) throw new Error(`无法翻译 LSF walltime: ${value}`);
+  const hhmm = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  // Slurm 的 MM:SS 不是 HH:MM；统一输出 HH:MM:SS，避免两小时缩成两分钟。
+  return `${hhmm}:00`;
+}
+
+function memoryWithUnit(value: string, numericUnit: 'KB' | 'MB'): string {
+  if (!/^\d+(?:\.\d+)?(?:[A-Za-z]+)?$/.test(value)) throw new Error(`无法翻译内存限制: ${value}`);
+  if (/[A-Za-z]/.test(value)) return value;
+  // LSF -M 默认是 KB，rusage[mem] 默认是 MB；目标 Slurm/PBS 统一显式 MB。
+  const megabytes = numericUnit === 'KB' ? Number(value) / 1024 : Number(value);
+  if (!Number.isFinite(megabytes) || megabytes <= 0) throw new Error(`无法翻译内存限制: ${value}`);
+  return `${megabytes}MB`;
+}
+
+function translateBsubLine(args: string, target: 'slurm' | 'pbs' | 'donau'): string {
   const tokens = args.split(/\s+/);
   const flag = tokens[0];
   const value = tokens.slice(1).join(' ');
-  const one = (lsf: string, slurm: string, pbs: string) => (target === 'slurm' ? `#SBATCH ${slurm}` : `#PBS ${pbs}`);
+  if (!value) throw new Error(`#BSUB ${flag} 缺少参数，不能安全翻译`);
+  const one = (slurm: string, pbs: string) => (target === 'slurm' ? `#SBATCH ${slurm}` : `#PBS ${pbs}`);
   switch (flag) {
-    case '-J': return one('-J', `--job-name=${value}`, `-N ${value.replace(/[^\w.-]/g, '_').slice(0, 60)}`);
-    case '-n': return one('-n', `--ntasks=${value}`, `-l nodes=1:ppn=${value}`);
-    case '-q': return one('-q', `--partition=${value}`, `-q ${value}`);
-    case '-o': return one('-o', `--output=${value}`, `-o ${value}`);
-    case '-e': return one('-e', `--error=${value}`, `-e ${value}`);
-    case '-W': return one('-W', `--time=${value}`, `-l walltime=${/^\d+$/.test(value) ? `${value}:00` : value}`);
-    case '-M': return one('-M', `--mem=${/\d/.test(value) && !/[A-Za-z]/.test(value) ? `${value}MB` : value}`, `-l mem=${value}`);
+    case '-J':
+      return target === 'donau' ? `#DSUB -n ${value}` : one(`--job-name=${value}`, `-N ${value.replace(/[^\w.-]/g, '_').slice(0, 60)}`);
+    case '-n':
+      if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error(`无效的 LSF 核数: ${value}`);
+      return target === 'donau' ? `#DSUB -R cpu=${value}` : one(`--ntasks=${value}`, `-l nodes=1:ppn=${value}`);
+    case '-q':
+      return target === 'donau' ? `#DSUB -q ${value}\n#DSUB -aa` : one(`--partition=${value}`, `-q ${value}`);
+    case '-o':
+      return target === 'donau' ? `#DSUB -o ${value}` : one(`--output=${value}`, `-o ${value}`);
+    case '-e':
+      if (target === 'donau') break;
+      return one(`--error=${value}`, `-e ${value}`);
+    case '-W':
+      if (target === 'donau') break;
+      return one(`--time=${lsfWalltime(value)}`, `-l walltime=${lsfWalltime(value)}`);
+    case '-M':
+      if (target === 'donau') break;
+      return one(`--mem=${memoryWithUnit(value, 'KB')}`, `-l mem=${memoryWithUnit(value, 'KB')}`);
     case '-R': {
+      if (target === 'donau') break;
       const mem = /rusage\[mem=([\d.]+[A-Za-z]*)\]/.exec(value)?.[1];
-      return mem ? one('-R', `--mem=${mem}`, `-l mem=${mem}`) : null;
+      if (mem) return one(`--mem=${memoryWithUnit(mem, 'MB')}`, `-l mem=${memoryWithUnit(mem, 'MB')}`);
+      break;
     }
-    default: return null; // 无法对应的指令丢弃（总比提交一个调度器不认识的脚本强）
   }
+  throw new Error(`#BSUB ${flag} 无法安全翻译到 ${target}，已拒绝静默丢弃资源或节点约束`);
 }
 
 /** LSF 作业从默认 bjobs 列表消失后，用历史列表确认 DONE/EXIT。 */

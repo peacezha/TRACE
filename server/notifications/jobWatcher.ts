@@ -6,7 +6,7 @@ import {
   loadSchedulerType, jobsCommand, parseJobsOutput, lsfFinalStateCommand, slurmFinalStateCommand,
   pbsFinalStateCommand, lsfOutputTailCommand, slurmOutputTailCommand, lsfJobsByIdsCommand,
   parseLsfJobsByIdsOutput, donauJobsByIdsCommand, parseDonauJobsByIdsOutput,
-  donauFinalStateCommand, parseDjobFinalState, donauOutputTailCommand, type SchedulerType,
+  donauFinalStateCommand, parseDjobFinalState, donauOutputTailCommand, parsePbsAccountingState, type SchedulerType,
 } from './scheduler';
 import type { JobEntry } from '../ai/types';
 import { loadNotifyConfig, sendNotification, type NotifyConfig } from './notifyService';
@@ -192,9 +192,8 @@ export class JobWatcher {
   private async resolvePbsFinalStatus(session: WatchSessionLike, jobId: string): Promise<'DONE' | 'EXIT' | undefined> {
     try {
       const raw = await session.cluster.exec(pbsFinalStateCommand(jobId), FINAL_STATE_EXEC_TIMEOUT_MS);
-      const exit = raw.match(/Exit_status\s*=\s*(-?\d+)\b/i);
-      if (!/job_state\s*=\s*[CF]\b/i.test(raw) || !exit) return undefined;
-      return Number(exit[1]) === 0 ? 'DONE' : 'EXIT';
+      const state = parsePbsAccountingState(raw);
+      return state === 'DONE' || state === 'EXIT' ? state : undefined;
     } catch {
       return undefined;
     }
@@ -233,6 +232,7 @@ export class JobWatcher {
   private async pollOnce(sessionId: string, session: WatchSessionLike): Promise<void> {
     // 会话级调度器标签优先（登录探测打标）；老会话无标签时回退全局手动配置
     const scheduler = session.scheduler ?? await loadSchedulerType();
+    if (scheduler === 'unknown') return; // 探测失败不能退回 LSF，更不能把空结果当作作业完成。
     const prev = this.prevJobs.get(sessionId);
     let jobs: JobEntry[];
     // 大 LSF/Donau 集群减负：已有监控基线且仍有未终态作业时，按 ID 定点查询（一条命令查全部），
@@ -271,6 +271,20 @@ export class JobWatcher {
       } catch {
         return; // 采集失败跳过本轮
       }
+    }
+
+    if (scheduler === 'pbs') {
+      const previous = new Map((prev ?? []).map(job => [job.jobId, job]));
+      jobs = await Promise.all(jobs.map(async job => {
+        const before = previous.get(job.jobId);
+        const shouldVerify = job.status === 'UNKNOWN' && (
+          (before && before.status !== 'DONE' && before.status !== 'EXIT') ||
+          this.deps.hasPendingBinding?.(sessionId, job.jobId)
+        );
+        if (!shouldVerify) return job;
+        const finalStatus = await this.resolvePbsFinalStatus(session, job.jobId);
+        return finalStatus ? { ...job, status: finalStatus } : job;
+      }));
     }
 
     this.prevJobs.set(sessionId, jobs);

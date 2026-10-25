@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import FilePreview from './FilePreview';
 import type { FileEntry } from '@/shared/fileTransfer';
 import { LARGE_TEXT_BYTES } from '@/shared/filePreview';
@@ -228,5 +228,69 @@ describe('FilePreview', () => {
 
     await screen.findByText('保存成功');
     expect(writeRemote).toHaveBeenCalledWith('s1', '/home/notes.txt', 'remote updated');
+  });
+
+  async function startDirtyEdit(onClose = vi.fn()) {
+    const { writeFile } = desktopWithPreview({
+      path: 'C:\\data\\notes.txt', encoding: 'utf8', content: 'original', bytesRead: 8,
+      totalSize: 8, truncated: false,
+    });
+    const view = render(<FilePreview file={file('notes.txt')} source="local" onClose={onClose} />);
+    await screen.findByText('original');
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    fireEvent.change(screen.getByTestId('preview-textarea'), { target: { value: 'updated' } });
+    return { ...view, onClose, writeFile };
+  }
+
+  it('关闭脏预览时支持继续编辑或放弃修改', async () => {
+    const { onClose } = await startDirtyEdit();
+    fireEvent.click(screen.getByRole('button', { name: '关闭预览' }));
+    const dialog = screen.getByRole('dialog', { name: '未保存的修改' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '继续编辑' }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('preview-textarea')).toHaveValue('updated');
+    fireEvent.click(screen.getByRole('button', { name: '关闭预览' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '放弃修改' }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('Esc 关闭脏预览同样先确认', async () => {
+    const { onClose } = await startDirtyEdit();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: '未保存的修改' })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('点击遮罩和取消编辑也会保护脏内容', async () => {
+    const { onClose } = await startDirtyEdit();
+    fireEvent.click(screen.getByTestId('preview-overlay'));
+    expect(screen.getByRole('dialog', { name: '未保存的修改' })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '继续编辑' }));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '放弃修改' }));
+    expect(screen.queryByTestId('preview-textarea')).not.toBeInTheDocument();
+    expect(screen.getByText('original')).toBeInTheDocument();
+  });
+
+  it('切换文件时确认，放弃后才加载新文件', async () => {
+    const { rerender, writeFile } = await startDirtyEdit();
+    rerender(<FilePreview file={file('other.txt')} source="local" onClose={vi.fn()} />);
+    expect(screen.getByRole('dialog', { name: '未保存的修改' })).toBeInTheDocument();
+    expect(writeFile).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '放弃修改' }));
+    expect(await screen.findByRole('dialog', { name: '预览 other.txt' })).toBeInTheDocument();
+  });
+
+  it('脏预览可先保存再执行关闭，保存失败则不关闭', async () => {
+    const { onClose, writeFile } = await startDirtyEdit();
+    writeFile.mockRejectedValueOnce(new Error('denied'));
+    fireEvent.click(screen.getByRole('button', { name: '关闭预览' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '保存' }));
+    expect(await screen.findByText(/denied/)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog', { name: '未保存的修改' })).getByRole('button', { name: '保存' }));
+    await screen.findByText('保存成功');
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

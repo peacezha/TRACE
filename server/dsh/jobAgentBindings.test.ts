@@ -45,10 +45,13 @@ describe('extractSubmittedJobIds', () => {
     expect(getBinding('101', 'ssh-1')).toMatchObject({ jobId: '101', resumeCount: 0 });
     expect(getBinding('100', 'ssh-1')).toBeUndefined();
   });
-  it('extracts LSF bsub and batch submit job ids', () => {
+  it('extracts LSF, Slurm, PBS and conservative Donau submit receipts', () => {
     expect(extractSubmittedJobIds('Job <424242> is submitted to queue <normal>.')).toEqual(['424242']);
     expect(extractSubmittedJobIds('Submitted batch job 7890')).toEqual(['7890']);
     expect(extractSubmittedJobIds('Job <123.4> is submitted to default queue.')).toEqual(['123.4']);
+    expect(extractSubmittedJobIds('12345.pbs01.example\n')).toEqual(['12345.pbs01.example']);
+    expect(extractSubmittedJobIds('jobId: 2048\n')).toEqual(['2048']);
+    expect(extractSubmittedJobIds('JobId = 4096')).toEqual(['4096']);
   });
 
   it('does not match unrelated output', () => {
@@ -56,6 +59,8 @@ describe('extractSubmittedJobIds', () => {
     expect(extractSubmittedJobIds('bjobs: no unfinished job found')).toEqual([]);
     expect(extractSubmittedJobIds('')).toEqual([]);
     expect(extractSubmittedJobIds('total 0\ndrwxr-xr-x 2 u g 4096 Jan 1 .')).toEqual([]);
+    expect(extractSubmittedJobIds('previous jobId: 123\njobId: not-a-number\n2048')).toEqual([]);
+    expect(extractSubmittedJobIds('12345.pbs01.example extra-columns')).toEqual([]);
   });
 
   it('dedupes and preserves first-appearance order across both patterns', () => {
@@ -70,10 +75,14 @@ describe('extractSubmittedJobIds', () => {
 });
 
 describe('isSubmissionCommand（v0.4.31：只有提交命令的输出才可信）', () => {
-  it('bsub/sbatch/qsub 判定为提交命令', () => {
+  it('bsub/sbatch/qsub/dsub -s 判定为提交命令', () => {
     expect(isSubmissionCommand('bsub < code/step-03.sh')).toBe(true);
     expect(isSubmissionCommand('sbatch run.slurm')).toBe(true);
     expect(isSubmissionCommand('cd /x && qsub job.pbs')).toBe(true);
+    expect(isSubmissionCommand('chmod +x step.dsub && dsub -s step.dsub')).toBe(true);
+    expect(isSubmissionCommand('dsub -q arm -aa -s step.dsub')).toBe(true);
+    expect(isSubmissionCommand('dsub step.dsub')).toBe(false);
+    expect(isSubmissionCommand('djob -s 123')).toBe(false);
   });
 
   it('读日志/查状态/普通命令不判定为提交', () => {

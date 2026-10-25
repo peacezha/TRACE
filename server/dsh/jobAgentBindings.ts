@@ -85,21 +85,26 @@ function persist(): void {
   writeFileAtomic0600(storeFile(), JSON.stringify(bindingsCache ?? [], null, 2));
 }
 
-// 与 server/ai/agentRunner.ts 的作业号提取规则一致：
-// "Job <123> is submitted to queue <normal>." / "Submitted batch job 456"。
+// 与 server/ai/agentRunner.ts 共用：只接受调度器明确的提交回执。
+// PBS 通常只返回一行 "123.server"；Donau 只接受独立的 "jobId: 123" 行，
+// 不用裸数字或宽泛的 Job 文本猜测，避免把日志内容当成新作业。
 const SUBMIT_PATTERNS = [
   /Job\s+<(\d+(?:[._]\d+)?)>\s+is\s+submitted\b/gi,
   /Submitted\s+batch\s+job\s+(\d+(?:[._]\d+)?)/gi,
+  /^\s*(\d+\.[A-Za-z0-9][A-Za-z0-9._-]*)\s*$/gm,
+  /^\s*jobId\s*[:=]\s*(\d+)\s*$/gim,
 ];
 
 /**
- * 只有命令本身是提交命令（bsub/sbatch/qsub）时，输出里的提交回执才可信。
+ * 只有命令本身是提交命令（bsub/sbatch/qsub/dsub -s）时，输出里的提交回执才可信。
  * v0.4.31 根因：AI 只是 cat 了历史 submit 日志，输出里的 "Job <id> is submitted"
  * 就被当成一次新提交——运行时宣布「交后台监控、本轮结束」，而那个作业早已被
-  * bkill，流程随之假死。读日志/查状态（bjobs/bhist/cat）绝不产生新提交。
+ * bkill，流程随之假死。读日志/查状态（bjobs/bhist/cat）绝不产生新提交。
  */
 export function isSubmissionCommand(command: string): boolean {
-  return /\b(?:bsub|sbatch|qsub)\b/.test(String(command || ''));
+  const text = String(command || '');
+  return /\b(?:bsub|sbatch|qsub)\b/.test(text)
+    || /\bdsub\b[^\n;&|]*\s-s(?:\s|$)/.test(text);
 }
 
 /** 从 bsub 输出提取作业号：按文本中首次出现位置排序、去重。"is not found" 等不会误报。 */

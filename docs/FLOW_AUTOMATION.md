@@ -78,7 +78,7 @@ interface FlowManifest {
 - API：`POST /api/workflows/:id/preflight`（执行） / `GET .../preflight`（读缓存）。
 - 实现：`server/workflows/preflight.ts`。
   1. 幂等创建四板块目录并同步 flow.json / manifest.json；
-  2. 一条组合 SSH 命令完成调度器探测（bsub/sbatch/qsub）+ 全部软件/参考数据检查；
+  2. 一条组合 SSH 命令完成调度器探测（bsub/sbatch/qsub/dsub）+ 全部软件/参考数据检查；
   3. 解析为 `PreflightResult`，写回 `01_software/env-check.json` 与 `02_reference/ref-check.json`。
 - 所有检查只读（`module av` / `command -v` / `test -e` / `du`），不 load、不安装；
 - 前端：流程卡片的"检查环境"按钮触发；"使用流程"会先预检再把结果附进执行协议。
@@ -90,7 +90,7 @@ interface FlowManifest {
 1. 读家目录预检结果；必需项缺失 → run.json 置 `blocked_env`，ask_user 选择补齐/改路径/放弃；
    补齐只在登录节点进行且必须用户同意；
 2. 按 `inputHint` 询问数据位置（候选列选项，禁止大面积 find），确认后写 `inputs.md`；
-3. 逐步执行：独立 `.lsf` 脚本、`bsub -w` 依赖串联、每步 summary，
+3. 逐步执行：每步使用 RUN/code 下的真实脚本，由当前调度器提交并串联依赖；资源指令按目标调度器转换，无法可靠转换时阻断而非静默丢弃。每步 summary
    判定 通过/警告/失败；命中 `qcGates` 的步骤把指标写入 run.json 的 `qc` 字段；
 4. 收尾归档到 `04_results/<runId>/`，按 analysis-report 技能模板生成报告。
 

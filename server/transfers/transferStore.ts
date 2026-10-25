@@ -23,6 +23,8 @@ export function normalizeRestoredTasks(tasks: TransferTask[]): TransferTask[] {
       ...task,
       sessionId: undefined,
       state: task.state === 'failed' ? 'failed' : 'paused',
+      // 重启后不能信任内存进度快照，续传时重新 stat 实际 .part。
+      conflictPolicy: 'resume',
       bytesPerSecond: 0,
     }));
 }
@@ -38,6 +40,7 @@ interface PersistedTask {
   localPath: string;
   remotePath: string;
   temporaryPath: string;
+  sourceFingerprint?: TransferTask['sourceFingerprint'];
   totalBytes: number;
   transferredBytes: number;
   state: TransferTask['state'];
@@ -57,6 +60,7 @@ function toPersisted(task: TransferTask): PersistedTask {
     localPath: task.localPath,
     remotePath: task.remotePath,
     temporaryPath: task.temporaryPath,
+    sourceFingerprint: task.sourceFingerprint,
     totalBytes: task.totalBytes,
     transferredBytes: task.transferredBytes,
     state: task.state,
@@ -81,15 +85,22 @@ export async function loadTasks(): Promise<TransferTask[]> {
   }
 }
 
+let saveQueue: Promise<void> = Promise.resolve();
+
 /**
- * Atomically persist tasks to disk.
- * Writes to a sibling `.tmp` file first, then renames atomically.
+ * Atomically persist tasks to disk. Calls share one queue because all writers use
+ * the same sibling .tmp; snapshots are captured before queuing to avoid mutation.
  */
-export async function saveTasks(tasks: TransferTask[]): Promise<void> {
-  const dir = path.dirname(STORE_PATH);
-  await fs.mkdir(dir, { recursive: true });
-  const tmpPath = STORE_PATH + '.tmp';
+export function saveTasks(tasks: TransferTask[]): Promise<void> {
   const data = JSON.stringify(tasks.map(toPersisted), null, 2);
-  await fs.writeFile(tmpPath, data, 'utf-8');
-  await fs.rename(tmpPath, STORE_PATH);
+  const write = async (): Promise<void> => {
+    const dir = path.dirname(STORE_PATH);
+    await fs.mkdir(dir, { recursive: true });
+    const tmpPath = STORE_PATH + '.tmp';
+    await fs.writeFile(tmpPath, data, 'utf-8');
+    await fs.rename(tmpPath, STORE_PATH);
+  };
+  const result = saveQueue.then(write, write);
+  saveQueue = result.catch(() => {});
+  return result;
 }

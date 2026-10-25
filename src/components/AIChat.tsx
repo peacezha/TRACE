@@ -536,8 +536,8 @@ function AgentSettingsFields({
       <div>
         <label className="block text-xs text-scholar-300 mb-1">集群路径权限</label>
         <select value={pathPolicy} onChange={e => onPathPolicyChange(e.target.value as AgentPathPolicy)} className={fieldClass}>
-          <option value="full_access">全部路径 / 多路径（推荐）</option>
-          <option value="scoped">仅流程与明确指定路径</option>
+          <option value="full_access">全部路径 / 多路径（高风险）</option>
+          <option value="scoped">仅流程与明确指定路径（推荐）</option>
         </select>
         <p className="mt-1 text-[10px] text-scholar-500">全部路径模式允许 AI 在同一任务中切换、复制和处理 SSH 账号可访问的多个目录。</p>
       </div>
@@ -2641,9 +2641,10 @@ export default function AIChat({ isOpen, executeCommand, socket, sessionId, onSk
       {runnerWorkflow && (
         <FlowRunnerDrawer
           workflow={runnerWorkflow}
-          sessionId={sessionId}
+          sessionId={clusterSessionId}
           socket={socket}
           onClose={() => setRunnerWorkflow(null)}
+          onConnectCompute={onOpenComputeBackend}
           onRun={handleUseWorkflow}
           onPickFolder={onPickRemoteFolder}
           onOpenRunFolder={path => onOpenRemoteFolder?.(path, sessionId)}

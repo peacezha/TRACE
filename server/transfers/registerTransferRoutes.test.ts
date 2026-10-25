@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Readable, Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTransferAdapter, hasActiveTransfersForSession, registerTransferRoutes } from './registerTransferRoutes';
+import { loadTasks } from './transferStore';
 
 vi.mock('./transferStore', () => ({
   loadTasks: vi.fn(async () => []),
@@ -19,6 +21,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.mocked(loadTasks).mockResolvedValue([]);
   await Promise.all(tempDirs.splice(0).map(dir => fs.promises.rm(dir, { recursive: true, force: true })));
 });
 
@@ -84,6 +87,38 @@ describe('createTransferAdapter', () => {
     ]);
   });
 
+  it('hashes both remote-copy endpoints with SHA256 and rejects different content', async () => {
+    const reads: string[] = [];
+    const adapter = createTransferAdapter((sessionId) => ({
+      cluster: {
+        getSftp: () => ({
+          createReadStream: (remotePath: string) => {
+            reads.push(`${remotePath}@${sessionId}`);
+            return Readable.from(sessionId === 'source' ? 'same-content' : 'same-content');
+          },
+        }),
+      },
+      home: '/home/user',
+    } as any));
+
+    await expect(adapter.verifyRemoteCopy!('/src/a.bin', '/dest/.a.bin.part', 'sha256', {
+      sourceSessionId: 'source', destinationSessionId: 'destination',
+    })).resolves.toBeUndefined();
+    expect(reads).toEqual(['/src/a.bin@source', '/dest/.a.bin.part@destination']);
+
+    const mismatch = createTransferAdapter((sessionId) => ({
+      cluster: {
+        getSftp: () => ({
+          createReadStream: () => Readable.from(sessionId === 'source' ? 'old' : 'new'),
+        }),
+      },
+      home: '/home/user',
+    } as any));
+    await expect(mismatch.verifyRemoteCopy!('/src/a.bin', '/dest/.a.bin.part', 'sha256', {
+      sourceSessionId: 'source', destinationSessionId: 'destination',
+    })).rejects.toThrow('checksum mismatch');
+  });
+
   it('preflights both clusters and repairs only current-user source/parent permissions', async () => {
     const sourceExec = vi.fn(async () => '');
     const destinationExec = vi.fn(async () => '');
@@ -142,6 +177,61 @@ describe('registerTransferRoutes', () => {
   });
 });
 
+describe('registerTransferRoutes restart rebind', () => {
+  it('rebinds a session-less restored task only through an explicit resume', async () => {
+    const localPath = fileURLToPath(import.meta.url);
+    const stat = await fs.promises.stat(localPath);
+    vi.mocked(loadTasks).mockResolvedValueOnce([{
+      id: 'restored-task', profileId: 'profile-a', direction: 'upload', localPath,
+      remotePath: '/data/a.bin', temporaryPath: '/data/.a.bin.trace-restored.part',
+      sourceFingerprint: { size: stat.size, mtime: stat.mtimeMs }, totalBytes: stat.size,
+      transferredBytes: 0, bytesPerSecond: 0, state: 'paused', conflictPolicy: 'overwrite',
+      verificationMode: 'size', retryCount: 0, createdAt: 1, updatedAt: 1,
+    }]);
+    const session = {
+      cluster: {
+        getSftp: () => ({
+          stat: (_path: string, callback: (error: Error | null, attrs?: unknown) => void) =>
+            callback(null, { size: stat.size, mtime: stat.mtimeMs / 1000 }),
+          createWriteStream: () => new Writable({ write(_c, _e, callback) { callback(); } }),
+          rename: (_from: string, _to: string, callback: (error?: Error) => void) => callback(),
+        }),
+        exec: async () => '',
+      },
+      home: '/home/alice',
+    };
+    const handlers = new Map<string, (req: any, res: any) => unknown>();
+    const app = {
+      get: vi.fn(),
+      post: vi.fn((route: string, handler: (req: any, res: any) => unknown) => { handlers.set(route, handler); }),
+      put: vi.fn(), delete: vi.fn(),
+    };
+    const io = { emit: vi.fn() };
+    await registerTransferRoutes(app as any, io as any, (id) => (id === 'ssh-new' ? session : undefined) as any);
+    const resume = handlers.get('/api/transfers/:id/resume')!;
+    const request = (profileId: string) => ({
+      session: {}, body: { profileId }, params: { id: 'restored-task' },
+      get: (name: string) => (name === 'X-SSH-Session-Id' ? 'ssh-new' : undefined),
+    });
+    const response = () => {
+      const res: any = { status: vi.fn(), json: vi.fn() };
+      res.status.mockReturnValue(res);
+      return res;
+    };
+
+    const wrongProfile = response();
+    await resume(request('profile-b'), wrongProfile);
+    expect(wrongProfile.status).toHaveBeenCalledWith(403);
+
+    const rebound = response();
+    await resume(request('profile-a'), rebound);
+    expect(rebound.json).toHaveBeenCalledWith({ ok: true });
+    expect(io.emit).toHaveBeenCalledWith('transfer:updated', expect.objectContaining({
+      id: 'restored-task', sessionId: 'ssh-new',
+    }));
+  });
+});
+
 describe('registerTransferRoutes batch enqueue', () => {
   // SFTP 桩：传输启动后会在后台失败，路由响应在此之前已发出，互不影响
   const session = {
@@ -159,7 +249,7 @@ describe('registerTransferRoutes batch enqueue', () => {
   const validItem = {
     profileId: 'p1',
     direction: 'upload',
-    localPath: 'D:\\a.bin',
+    localPath: fileURLToPath(import.meta.url),
     remotePath: '/data/a.bin',
     temporaryPath: '/data/.a.bin.trace-t1.part',
     totalBytes: 4096,
@@ -254,6 +344,8 @@ describe('registerTransferRoutes batch enqueue', () => {
     expect(payload.transfers).toHaveLength(2);
     expect(payload.transfers[0].id).toBeTruthy();
     expect(payload.transfers[0].sessionId).toBe('ssh-1');
+    expect(payload.transfers[0].sourceFingerprint.size).toBeGreaterThan(0);
+    expect(payload.transfers[0].sourceFingerprint.mtime).toBeGreaterThan(0);
     expect(payload.transfers[1].remotePath).toBe('/data/b.bin');
     expect(io.emit).toHaveBeenCalledWith(
       'transfer:summary',
@@ -270,6 +362,16 @@ describe('registerTransferRoutes batch enqueue', () => {
     const badRes = makeRes();
     await settings(makeReq({ concurrency: 9 }), badRes);
     expect(badRes.status).toHaveBeenCalledWith(400);
+  });
+
+  it('rejects bandwidthLimit because throttling is not implemented', async () => {
+    const { settings } = await setup();
+    const res = makeRes();
+    await settings(makeReq({ bandwidthLimit: 1024 * 1024 }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ message: expect.stringContaining('not implemented') }),
+    }));
   });
 });
 
@@ -295,8 +397,27 @@ describe('createTransferAdapter stream buffers', () => {
     adapter.openRemoteWrite('/data/.a.bin.part', 1024, 'ssh-1');
     adapter.openRemoteRead('/data/a.bin', 2048, 'ssh-1');
 
-    expect(writeOptions[0]).toEqual({ start: 1024, highWaterMark: 512 * 1024 });
+    expect(writeOptions[0]).toEqual({ flags: 'r+', start: 1024, highWaterMark: 512 * 1024 });
     expect(readOptions[0]).toEqual({ start: 2048, highWaterMark: 512 * 1024 });
+  });
+
+  it('uses 512KB buffers for local read/write streams too', async () => {
+    const dir = await makeTempDir();
+    const localPath = path.join(dir, 'a.bin');
+    await fs.promises.writeFile(localPath, 'content');
+    const adapter = createTransferAdapter(() => undefined);
+    const reader = adapter.openLocalRead(localPath, 0);
+    const partPath = path.join(dir, '.a.bin.part');
+    await fs.promises.writeFile(partPath, 'partial');
+    const writer = adapter.openLocalWrite(partPath, 0);
+    const resumeWriter = adapter.openLocalWrite(partPath, 7);
+
+    expect(reader.readableHighWaterMark).toBe(512 * 1024);
+    expect(writer.writableHighWaterMark).toBe(512 * 1024);
+    expect(resumeWriter.flags).toBe('r+');
+    reader.destroy();
+    writer.destroy();
+    resumeWriter.destroy();
   });
 
   it('exposes the injected ensureSessionAlive hook on the adapter', () => {
@@ -308,12 +429,12 @@ describe('createTransferAdapter stream buffers', () => {
 
 describe('hasActiveTransfersForSession', () => {
   it('reports sessions with in-flight transfers so the eviction loop can skip them', async () => {
-    // fastPut 永不 resolve：任务稳定停在 running
+    // 写入回调永不完成：pipeline 稳定停在 running
     const hangingSession = {
       cluster: {
         getSftp: () => ({
           stat: (_path: string, cb: (err?: Error) => void) => cb(new Error('no sftp in test')),
-          fastPut: () => new Promise<void>(() => {}),
+          createWriteStream: () => new Writable({ write() {} }),
         }),
         exec: async () => '',
       },
@@ -344,7 +465,7 @@ describe('hasActiveTransfersForSession', () => {
       body: {
         profileId: 'p1',
         direction: 'upload',
-        localPath: 'D:\\a.bin',
+        localPath: fileURLToPath(import.meta.url),
         remotePath: '/data/a.bin',
         temporaryPath: '/data/.a.bin.trace-hang.part',
         totalBytes: 4096,

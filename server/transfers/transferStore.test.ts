@@ -1,5 +1,19 @@
-import { describe, expect, it } from 'vitest';
-import { normalizeRestoredTasks } from './transferStore';
+import fs from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { TransferTask } from '../../shared/fileTransfer';
+import { normalizeRestoredTasks, saveTasks } from './transferStore';
+
+afterEach(() => vi.restoreAllMocks());
+
+function taskFixture(id: string): TransferTask {
+  return {
+    id, profileId: 'p1', direction: 'upload', localPath: 'D:\\a.bin',
+    remotePath: '/data/a.bin', temporaryPath: '/data/.a.bin.part',
+    sourceFingerprint: { size: 100, mtime: 1234 }, totalBytes: 100,
+    transferredBytes: 42, bytesPerSecond: 0, state: 'paused', conflictPolicy: 'resume',
+    verificationMode: 'size', retryCount: 0, createdAt: 1, updatedAt: 2,
+  };
+}
 
 describe('normalizeRestoredTasks', () => {
   it('restores incomplete work as paused without credentials or session ids', () => {
@@ -29,11 +43,12 @@ describe('normalizeRestoredTasks', () => {
     expect(tasks[1].state).toBe('paused');
   });
 
-  it('resets bytesPerSecond to zero', () => {
+  it('resets bytesPerSecond and forces actual .part reconciliation', () => {
     const [task] = normalizeRestoredTasks([{
-      id: 't1', state: 'paused', bytesPerSecond: 999, profileId: 'p1',
+      id: 't1', state: 'paused', bytesPerSecond: 999, profileId: 'p1', conflictPolicy: 'overwrite',
     } as any]);
     expect(task.bytesPerSecond).toBe(0);
+    expect(task.conflictPolicy).toBe('resume');
   });
 
   it('does not expose error for completed tasks', () => {
@@ -42,5 +57,32 @@ describe('normalizeRestoredTasks', () => {
     } as any]);
     expect(task.state).toBe('failed');
     expect(task.error).toBe('disk full');
+  });
+});
+
+describe('saveTasks serialization', () => {
+  it('serializes concurrent atomic writes and persists the source fingerprint', async () => {
+    let activeWrites = 0;
+    let maxActiveWrites = 0;
+    const snapshots: string[] = [];
+    vi.spyOn(fs.promises, 'mkdir').mockResolvedValue(undefined);
+    vi.spyOn(fs.promises, 'rename').mockResolvedValue(undefined);
+    vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (_path, data) => {
+      activeWrites++;
+      maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      snapshots.push(String(data));
+      activeWrites--;
+    });
+
+    await Promise.all([
+      saveTasks([taskFixture('first')]),
+      saveTasks([taskFixture('second')]),
+      saveTasks([taskFixture('third')]),
+    ]);
+
+    expect(maxActiveWrites).toBe(1);
+    expect(snapshots.map(data => JSON.parse(data)[0].id)).toEqual(['first', 'second', 'third']);
+    expect(JSON.parse(snapshots[2])[0].sourceFingerprint).toEqual({ size: 100, mtime: 1234 });
   });
 });

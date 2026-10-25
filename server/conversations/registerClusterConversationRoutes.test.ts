@@ -34,6 +34,7 @@ function makeFakeService() {
       if (dirs.has(dir)) throw new Error('mkdir: File exists');
       dirs.add(dir);
     },
+    async chmod() {},
     async list(dir: string) {
       if (!dirs.has(dir)) throw new Error('No such directory');
       const prefix = dir.endsWith('/') ? dir : dir + '/';

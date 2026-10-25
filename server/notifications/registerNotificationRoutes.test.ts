@@ -4,11 +4,29 @@
 // 测试方式对齐 registerClusterConversationRoutes.test.ts：真实 express 监听临时端口 + fetch。
 import http from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   registerNotificationRoutes,
   type ListedClusterSession,
 } from './registerNotificationRoutes';
+
+const notifyMocks = vi.hoisted(() => ({
+  config: {
+    enabled: true,
+    channel: 'email',
+    sendKey: 'send-secret',
+    token: 'token-secret',
+    webhook: 'https://example.org/secret',
+    smtpPass: 'smtp-secret',
+  },
+  save: vi.fn(async () => {}),
+}));
+
+vi.mock('./notifyService', () => ({
+  loadNotifyConfig: async () => ({ ...notifyMocks.config }),
+  saveNotifyConfig: notifyMocks.save,
+  sendNotification: vi.fn(),
+}));
 
 const servers: http.Server[] = [];
 
@@ -192,5 +210,34 @@ describe('GET /api/jobs/summary（重构后共用采集逻辑）', () => {
     expect(body.jobs).toHaveLength(2);
     expect(body.jobs[0]).toMatchObject({ jobId: '201', status: 'RUN' });
     expect(typeof body.updatedAt).toBe('number');
+  });
+});
+
+describe('notification config secret masking', () => {
+  it('masks every secret and preserves masked values on save', async () => {
+    const baseUrl = await startRoutes(() => []);
+    const getRes = await fetch(`${baseUrl}/api/notify/config`);
+    const getBody = await getRes.json();
+    expect(getRes.status).toBe(200);
+    expect(getBody.config).toMatchObject({
+      sendKey: '******', token: '******', webhook: '******', smtpPass: '******',
+    });
+    expect(JSON.stringify(getBody)).not.toContain('secret');
+
+    notifyMocks.save.mockClear();
+    const putRes = await fetch(`${baseUrl}/api/notify/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: true,
+        channel: 'email',
+        sendKey: '******',
+        token: '******',
+        webhook: '******',
+        smtpPass: '******',
+      }),
+    });
+    expect(putRes.status).toBe(200);
+    expect(notifyMocks.save).toHaveBeenCalledWith(expect.objectContaining(notifyMocks.config));
   });
 });

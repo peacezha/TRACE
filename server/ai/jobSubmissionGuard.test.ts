@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   canonicalSubmissionIntent,
+  isDefiniteSubmissionRejection,
   JobSubmissionGuard,
   preflightJobSubmission,
   resolveSubmissionScriptPath,
@@ -116,5 +117,87 @@ describe('job submission guard', () => {
     const retry = await guard.prepare({ ...base, exec: async () => '75598502 EXIT\n', now: 2000 });
     expect(retry.kind).toBe('execute');
     expect(retry.kind === 'execute' ? retry.claim.claimId : '').not.toBe(first.claim.claimId);
+  });
+
+  it('supports dsub -s script identity without treating plain dsub as script submission', () => {
+    expect(resolveSubmissionScriptPath('cd /home/u/run && dsub -s code/step.dsub', {}))
+      .toBe('/home/u/run/code/step.dsub');
+    expect(resolveSubmissionScriptPath('dsub --help', {})).toBeUndefined();
+    expect(canonicalSubmissionIntent('dsub -s code/step.dsub', { workflowRunDir: '/home/u/run' }).intent)
+      .toBe('dsub:script:/home/u/run/code/step.dsub');
+  });
+
+  it('keeps unknown durable across lease expiry and guard restart', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-submit-guard-'));
+    roots.push(root);
+    const base = {
+      sessionId: 'ssh-1', conversationKey: 'conv-1',
+      command: 'dsub -s /home/u/run/step.dsub', scheduler: 'donau' as const,
+    };
+    const guard = new JobSubmissionGuard(root);
+    const first = await guard.prepare({ ...base, exec: async () => '', now: 1000 });
+    expect(first.kind).toBe('execute');
+    if (first.kind !== 'execute') return;
+    guard.markUnknown(first.claim, 1010);
+
+    const probe = vi.fn(async () => '999 x u RUNNING q');
+    const restarted = new JobSubmissionGuard(root);
+    const retry = await restarted.prepare({ ...base, exec: probe, now: 10_000_000 });
+    expect(retry.kind).toBe('unknown');
+    expect(retry.kind === 'unknown' ? retry.record.state : '').toBe('unknown');
+    expect(probe).not.toHaveBeenCalled();
+    expect(restarted.list()).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(path.join(root, 'job-submission-ledger.json'), 'utf8'))[0].state)
+      .toBe('unknown');
+  });
+
+  it('unlocks unknown only through an explicit retry decision', async () => {
+    const guard = createGuard();
+    const base = {
+      sessionId: 'ssh-1', conversationKey: 'conv-1',
+      command: 'bsub < /home/u/run/step.sh', scheduler: 'lsf' as const,
+      exec: async () => '',
+    };
+    const first = await guard.prepare({ ...base, now: 1000 });
+    expect(first.kind).toBe('execute');
+    if (first.kind !== 'execute') return;
+    guard.markUnknown(first.claim, 1010);
+    const unknown = await guard.prepare({ ...base, now: 2000 });
+    expect(unknown.kind).toBe('unknown');
+    if (unknown.kind !== 'unknown') return;
+
+    const claim = guard.retryUnknown(unknown.record, 3000);
+    expect(claim.claimId).not.toBe(first.claim.claimId);
+    expect(guard.list()[0]).toMatchObject({ state: 'submitting', claimId: claim.claimId });
+    expect(() => guard.retryUnknown(unknown.record, 3001)).toThrow('已变化');
+  });
+
+  it('turns an empty completion into unknown and releases only an explicit rejection', async () => {
+    const guard = createGuard();
+    const base = {
+      sessionId: 'ssh-1', conversationKey: 'conv-1',
+      command: 'qsub /home/u/run/job.pbs', scheduler: 'pbs' as const,
+      exec: async () => '',
+    };
+    const first = await guard.prepare({ ...base, now: 1000 });
+    expect(first.kind).toBe('execute');
+    if (first.kind !== 'execute') return;
+    guard.complete(first.claim, [], 1001);
+    expect((await guard.prepare({ ...base, now: 999_999 })).kind).toBe('unknown');
+
+    const rejected = await guard.prepare({
+      ...base, command: 'qsub /home/u/run/other.pbs', now: 2000,
+    });
+    expect(rejected.kind).toBe('execute');
+    if (rejected.kind !== 'execute') return;
+    guard.fail(rejected.claim);
+    expect(guard.list().filter(record => record.intent.includes('other.pbs'))).toEqual([]);
+  });
+
+  it('does not misclassify SSH failure text containing an exit code as definite rejection', () => {
+    expect(isDefiniteSubmissionRejection(new Error('Command exited with code 1: queue does not exist'))).toBe(true);
+    expect(isDefiniteSubmissionRejection(new Error('SSH connection reset; remote exited with code 255'))).toBe(false);
+    expect(isDefiniteSubmissionRejection(new Error('Command timed out after 30000 ms'))).toBe(false);
+    expect(isDefiniteSubmissionRejection(new Error('channel closed'))).toBe(false);
   });
 });

@@ -111,4 +111,10 @@ describe('JobsPanel 通知渠道提示', () => {
     await screen.findByText(/完成事件/);
     expect(screen.queryByText('可在通知设置里配置飞书/邮件推送作业完成消息')).not.toBeInTheDocument();
   });
+
+  it('调度器未知时明确展示，不回退为 LSF', async () => {
+    mockFetch({ scheduler: 'unknown', events: [] });
+    render(<JobsPanel isOpen onClose={() => undefined} sessionId="ssh-1" />);
+    expect(await screen.findByDisplayValue('调度器未知')).toBeInTheDocument();
+  });
 });

@@ -57,6 +57,13 @@ describe('ClusterJobStatusBar', () => {
     });
   });
 
+  it('调度器探测未知时明确显示 unknown，不回退为 LSF', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ jobs: [], scheduler: 'unknown' })));
+    render(<ClusterJobStatusBar sessionId="ssh-1" targetLabel="alice@cluster" onOpenDetails={() => undefined} />);
+    expect(await screen.findByText(/alice@cluster/)).toHaveTextContent('调度器未知');
+    expect(screen.getByText(/alice@cluster/)).not.toHaveTextContent('LSF');
+  });
+
   it('详情按钮交给 App 打开完整作业面板', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response({ jobs: [], scheduler: 'lsf' })));
     const onOpenDetails = vi.fn();

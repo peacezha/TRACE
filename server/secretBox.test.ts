@@ -70,6 +70,17 @@ describe('secretBox', () => {
     }
   });
 
+  it('桌面模式缺少加密密钥时拒绝明文落盘，纯开发模式仍可透传', () => {
+    delete process.env.TRACE_ENCRYPTION_KEY;
+    process.env.TRACE_DESKTOP_TOKEN = 'desktop-test-token';
+    try {
+      expect(() => encryptSecret('must-not-be-plaintext')).toThrow('拒绝明文落盘');
+    } finally {
+      delete process.env.TRACE_DESKTOP_TOKEN;
+    }
+    expect(encryptSecret('development-only')).toBe('development-only');
+  });
+
   it('空值与已加密值的幂等处理', () => {
     process.env.TRACE_ENCRYPTION_KEY = KEY_A;
     expect(encryptSecret('')).toBe('');

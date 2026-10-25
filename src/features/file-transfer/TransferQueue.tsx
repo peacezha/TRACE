@@ -131,6 +131,7 @@ const TaskRow = memo(function TaskRow({ task, onPause, onResume, onCancel, onRet
         <span className="queue-filename" title={getSourceDisplay(task)}>
           {getSourceDisplay(task)}
         </span>
+        {task.error && <span className="block truncate text-[10px] text-red-400" role="alert" title={task.error}>{task.error}</span>}
       </div>
 
       {/* Destination */}
@@ -258,6 +259,17 @@ export default function TransferQueue({
     task.state === 'running' || task.state === 'queued' || task.state === 'retrying');
   const canResumeAll = tasks.some((task) => task.state === 'paused');
   const canCancelAll = tasks.some((task) => ACTIVE_STATES.includes(task.state));
+  const statusText = tasks.length === 0
+    ? '暂无传输任务'
+    : summary.active > 0
+      ? `${summary.active} 个进行中`
+      : summary.failed > 0
+        ? `${summary.failed} 个失败`
+        : tasks.some(task => task.state === 'paused')
+          ? '传输已暂停'
+          : tasks.some(task => task.state === 'queued' || task.state === 'running' || task.state === 'retrying')
+            ? '传输进行中'
+            : '传输完成';
 
   if (collapsed) {
     return (
@@ -270,9 +282,7 @@ export default function TransferQueue({
           <ChevronUp size={14} />
         </button>
         <span className="queue-status-strip">
-          {summary.active > 0
-            ? `${summary.active} 个进行中`
-            : '传输完成'}
+          {statusText}
           {summary.progress > 0 && (
             <span className="queue-status-progress">
               {' '}— {Math.round(summary.progress * 100)}%

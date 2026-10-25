@@ -9,7 +9,7 @@ interface JobEntry {
   runtime?: string;
 }
 
-type SchedulerType = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+type SchedulerType = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
 
 interface ClusterJobStatusBarProps {
   sessionId?: string | null;
@@ -32,6 +32,7 @@ const SCHEDULER_LABEL: Record<SchedulerType, string> = {
   pbs: 'PBS',
   donau: 'Donau',
   none: '无调度器',
+  unknown: '调度器未知',
 };
 
 function normalizeJobs(value: unknown): JobEntry[] {
@@ -78,7 +79,7 @@ export default function ClusterJobStatusBar({
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body?.error || '获取集群任务失败');
       setJobs(normalizeJobs(body?.jobs));
-      setScheduler(['slurm', 'pbs', 'donau', 'none'].includes(body?.scheduler) ? body.scheduler : 'lsf');
+      setScheduler(['slurm', 'pbs', 'donau', 'none', 'unknown'].includes(body?.scheduler) ? body.scheduler : 'lsf');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

@@ -28,6 +28,7 @@ interface TerminalAIProps {
   onSendToAI?: (selectedText: string) => void;
   onFileLinkClick?: (pathText: string) => void;
   terminalRef: React.RefObject<TerminalHandle | null>;
+  scheduler?: string | null;
 }
 
 // Escape sequence regex for arrow keys, home, end, etc.
@@ -44,6 +45,7 @@ export default function TerminalAI({
   onSendToAI,
   onFileLinkClick,
   terminalRef,
+  scheduler,
 }: TerminalAIProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -449,6 +451,7 @@ export default function TerminalAI({
             onSendToAI={handleSendToAI}
             onAnalyzeError={handleAnalyzeError}
             onClose={() => setAssistText(null)}
+            scheduler={scheduler}
           />
         </div>
       ) : null}

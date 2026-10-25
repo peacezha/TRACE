@@ -10,6 +10,8 @@ interface TerminalAssistPanelProps {
   onSendToAI: (text: string) => void;
   onAnalyzeError: (text: string) => void;
   onClose: () => void;
+  /** 当前集群调度器（lsf/slurm/pbs/none），缺省兼容 LSF。 */
+  scheduler?: string | null;
 }
 
 /**
@@ -24,8 +26,9 @@ export default function TerminalAssistPanel({
   onSendToAI,
   onAnalyzeError,
   onClose,
+  scheduler,
 }: TerminalAssistPanelProps) {
-  const analysis = useMemo(() => analyzeTerminalSelection(selectedText), [selectedText]);
+  const analysis = useMemo(() => analyzeTerminalSelection(selectedText, scheduler), [selectedText, scheduler]);
   const [input, setInput] = useState('');
   // 转交 AI 后的短暂提示（随后自动关闭小窗）
   const [handedOff, setHandedOff] = useState(false);
@@ -44,7 +47,7 @@ export default function TerminalAssistPanel({
   const submitInput = () => {
     const text = input.trim();
     if (!text || handedOff) return;
-    const intent = resolveAssistIntent(text, analysis);
+    const intent = resolveAssistIntent(text, analysis, scheduler);
     if (intent.kind === 'command') {
       onExecuteCommand(intent.command);
       onClose();

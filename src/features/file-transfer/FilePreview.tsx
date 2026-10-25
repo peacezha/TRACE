@@ -48,13 +48,15 @@ function formatSize(bytes: number): string {
 }
 
 export default function FilePreview({
-  file,
+  file: requestedFile,
   source,
   sessionId,
   onClose,
   onOpen,
   onSaved,
 }: FilePreviewProps) {
+  const [file, setFile] = useState<FileEntry | null>(requestedFile);
+  const [pendingAction, setPendingAction] = useState<{ run: () => void } | null>(null);
   const resolvedSource: FileSide = source || (sessionId ? 'remote' : 'local');
   const descriptor = useMemo(
     () => file ? classifyPreview(file.name, file.size) : null,
@@ -64,6 +66,7 @@ export default function FilePreview({
   const [isEditing, setIsEditing] = useState(false);
   const [editedText, setEditedText] = useState('');
   const [saveState, setSaveState] = useState<SaveState>({ status: 'idle' });
+  const isDirty = isEditing && state.status === 'ready' && editedText !== state.payload.content;
 
   const loadPreview = useCallback((signal: AbortSignal) => {
     if (!file || !descriptor) return Promise.resolve();
@@ -108,12 +111,28 @@ export default function FilePreview({
   }, [file?.path, file?.size]);
 
   useEffect(() => {
+    if (requestedFile?.path === file?.path && requestedFile?.size === file?.size) return;
+    if (isDirty) setPendingAction({ run: () => setFile(requestedFile) });
+    else setFile(requestedFile);
+  }, [requestedFile]); // eslint-disable-line react-hooks/exhaustive-deps -- 只在父级请求切文件时检查当前脏状态
+
+  const requestClose = useCallback(() => {
+    if (isDirty) setPendingAction({ run: onClose });
+    else onClose();
+  }, [isDirty, onClose]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isEditing) onClose();
+      if (event.key !== 'Escape') return;
+      // 捕获阶段拦截，避免外层文件抽屉先响应 Esc 而绕过脏状态确认。
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (pendingAction) setPendingAction(null);
+      else requestClose();
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, isEditing]);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [requestClose, pendingAction]);
 
   const canEdit = useMemo(() => {
     if (!descriptor) return false;
@@ -136,8 +155,13 @@ export default function FilePreview({
     setSaveState({ status: 'idle' });
   }, []);
 
-  const handleSave = useCallback(async () => {
-    if (!file || !canEdit) return;
+  const requestCancelEdit = useCallback(() => {
+    if (isDirty) setPendingAction({ run: handleCancelEdit });
+    else handleCancelEdit();
+  }, [handleCancelEdit, isDirty]);
+
+  const handleSave = useCallback(async (): Promise<boolean> => {
+    if (!file || !canEdit) return false;
     setSaveState({ status: 'saving' });
     try {
       if (resolvedSource === 'remote') {
@@ -155,11 +179,29 @@ export default function FilePreview({
       await loadPreview(controller.signal);
       setIsEditing(false);
       setEditedText('');
+      return true;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setSaveState({ status: 'error', message });
+      return false;
     }
   }, [canEdit, editedText, file, loadPreview, onSaved, resolvedSource, sessionId]);
+
+  const discardAndContinue = useCallback(() => {
+    const action = pendingAction;
+    setPendingAction(null);
+    handleCancelEdit();
+    action?.run();
+  }, [handleCancelEdit, pendingAction]);
+
+  const saveAndContinue = useCallback(async () => {
+    if (!pendingAction) return;
+    if (await handleSave()) {
+      const action = pendingAction;
+      setPendingAction(null);
+      action.run();
+    }
+  }, [handleSave, pendingAction]);
 
   if (!file || !descriptor) return null;
 
@@ -201,7 +243,7 @@ export default function FilePreview({
   };
 
   return (
-    <div className="file-transfer-dialog-overlay" onClick={onClose} data-testid="preview-overlay">
+    <div className="file-transfer-dialog-overlay" onClick={requestClose} data-testid="preview-overlay">
       <div
         className="file-transfer-dialog preview-dialog preview-dialog-rich"
         onClick={event => event.stopPropagation()}
@@ -228,7 +270,7 @@ export default function FilePreview({
               <button
                 type="button"
                 className="file-transfer-btn-secondary"
-                onClick={handleCancelEdit}
+                onClick={requestCancelEdit}
                 disabled={saveState.status === 'saving'}
               >
                 <RotateCcw size={14} />取消
@@ -260,7 +302,7 @@ export default function FilePreview({
               )}
             </>
           )}
-          <button className="queue-action-btn" onClick={onClose} aria-label="关闭预览">
+          <button className="queue-action-btn" onClick={requestClose} aria-label="关闭预览">
             <X size={14} />
           </button>
         </div>
@@ -300,6 +342,19 @@ export default function FilePreview({
         {saveState.status === 'error' && (
           <div className="preview-save-status preview-save-status-error" role="alert">
             保存失败：{saveState.message}
+          </div>
+        )}
+        {pendingAction && (
+          <div className="file-transfer-dialog-overlay" onClick={event => event.stopPropagation()}>
+            <div className="file-transfer-dialog" role="dialog" aria-label="未保存的修改">
+              <h3 className="dialog-title">未保存的修改</h3>
+              <p className="dialog-body">当前文件有未保存的修改。保存后继续，还是放弃修改？</p>
+              <div className="file-transfer-dialog-actions">
+                <button type="button" className="file-transfer-btn-cancel" onClick={() => setPendingAction(null)} disabled={saveState.status === 'saving'}>继续编辑</button>
+                <button type="button" className="file-transfer-btn-danger" onClick={discardAndContinue} disabled={saveState.status === 'saving'}>放弃修改</button>
+                <button type="button" className="file-transfer-btn-primary" onClick={() => void saveAndContinue()} disabled={saveState.status === 'saving'}>保存</button>
+              </div>
+            </div>
           </div>
         )}
       </div>

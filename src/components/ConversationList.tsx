@@ -136,11 +136,14 @@ export default function ConversationList({
   const handleDelete = async (id: string) => {
     try {
       const target = conversations.find(c => c.id === id);
+      if (!target || !window.confirm(`确定删除对话“${target.title}”吗？此操作不可撤销。`)) return;
+      setError(null);
       const targetSession = target?.originSessionId && target.originSessionId !== 'local-workbench' ? target.originSessionId : sessionId;
       const response = await fetch(`/api/conversations/${id}`, { method: 'DELETE', credentials: 'include' as RequestCredentials, headers: targetSession ? { 'X-SSH-Session-Id': targetSession } : sessionHeaders() });
-      if (isPublicWeb() && !response.ok) throw new Error((await response.json()).error || '删除失败');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.success === false) throw new Error(data.error || `删除失败 (${response.status})`);
       setConversations(prev => prev.filter(c => c.id !== id));
-    } catch (e) { console.error(e); if (isPublicWeb()) setError(e instanceof Error ? e.message : '删除失败'); }
+    } catch (e) { console.error(e); setError(e instanceof Error ? e.message : '删除失败'); }
   };
 
   const [importingId, setImportingId] = useState<string | null>(null);

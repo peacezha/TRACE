@@ -109,6 +109,13 @@ describe('WorkbenchSidebar 主导航', () => {
     expect(computeNav.querySelector('span.rounded-full')).toBeNull();
   });
 
+  it('文件导航显示传输活动或失败角标', () => {
+    const { rerender } = render(<WorkbenchSidebar {...makeProps({ unreadCounts: { files: 2 } })} />);
+    expect(screen.getByRole('button', { name: /文件/ }).querySelector('span.rounded-full')?.textContent).toBe('2');
+    rerender(<WorkbenchSidebar {...makeProps({ unreadCounts: { files: 0 } })} />);
+    expect(screen.getByRole('button', { name: '文件' }).querySelector('span.rounded-full')).toBeNull();
+  });
+
   it('点击导航项触发切换回调', () => {
     const props = makeProps();
     render(<WorkbenchSidebar {...props} />);

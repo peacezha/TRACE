@@ -61,11 +61,11 @@ export function createTransferAdapter(
     return session.cluster.getSftp();
   };
 
-  const statRemote = (remotePath: string, sessionId: string): Promise<{ size: number }> =>
+  const statRemote = (remotePath: string, sessionId: string): Promise<{ size: number; mtime: number }> =>
     new Promise((resolve, reject) => {
       getSftp(sessionId).stat(remotePath, (err, attrs) => {
         if (err) reject(err);
-        else resolve({ size: attrs.size ?? 0 });
+        else resolve({ size: attrs.size ?? 0, mtime: attrs.mtime ?? 0 });
       });
     });
 
@@ -82,12 +82,29 @@ export function createTransferAdapter(
       return stat.size;
     },
 
+    remoteFingerprint: async (remotePath, sessionId) => {
+      const attrs = await statRemote(remotePath, sessionId);
+      return { size: attrs.size, mtime: attrs.mtime * 1000 };
+    },
+
+    localFingerprint: async (localPath) => {
+      const stat = await fs.promises.stat(localPath);
+      return { size: stat.size, mtime: stat.mtimeMs };
+    },
+
     openLocalRead: (localPath, offset) =>
-      fs.createReadStream(localPath, { start: offset }),
+      fs.createReadStream(localPath, {
+        start: offset,
+        highWaterMark: SFTP_STREAM_HIGH_WATER_MARK,
+      }),
 
     openRemoteWrite: (remotePath, offset, sessionId) => {
       const sftp = getSftp(sessionId);
-      return sftp.createWriteStream(remotePath, { start: offset, highWaterMark: SFTP_STREAM_HIGH_WATER_MARK });
+      return sftp.createWriteStream(remotePath, {
+        flags: offset > 0 ? 'r+' : 'w',
+        start: offset,
+        highWaterMark: SFTP_STREAM_HIGH_WATER_MARK,
+      });
     },
 
     openRemoteRead: (remotePath, offset, sessionId) => {
@@ -96,28 +113,10 @@ export function createTransferAdapter(
     },
 
     openLocalWrite: (localPath, offset) =>
-      fs.createWriteStream(localPath, { start: offset }),
-
-    // fastPut/fastGet：ssh2 自带的并行块传输（默认 64 并发 × 32KB），
-    // 全新传输的吞吐远高于 createReadStream/createWriteStream 单流一问一答
-    fastPut: (localPath, remotePath, sessionId, onProgress) =>
-      new Promise<void>((resolve, reject) => {
-        getSftp(sessionId).fastPut(
-          localPath,
-          remotePath,
-          { step: (total) => onProgress(total) },
-          (err) => (err ? reject(err) : resolve()),
-        );
-      }),
-
-    fastGet: (remotePath, localPath, sessionId, onProgress) =>
-      new Promise<void>((resolve, reject) => {
-        getSftp(sessionId).fastGet(
-          remotePath,
-          localPath,
-          { step: (total) => onProgress(total) },
-          (err) => (err ? reject(err) : resolve()),
-        );
+      fs.createWriteStream(localPath, {
+        flags: offset > 0 ? 'r+' : 'w',
+        start: offset,
+        highWaterMark: SFTP_STREAM_HIGH_WATER_MARK,
       }),
 
     verify: async (localPath, remotePath, mode, context) => {
@@ -129,11 +128,37 @@ export function createTransferAdapter(
         }
       } else {
         const localHash = await computeFileHash(localPath);
-        const remoteHash = await computeRemoteHash(getSftp(context.sessionId).createReadStream(remotePath));
+        const remoteHash = await computeRemoteHash(getSftp(context.sessionId).createReadStream(
+          remotePath,
+          { highWaterMark: SFTP_STREAM_HIGH_WATER_MARK },
+        ));
         if (localHash !== remoteHash) {
           throw new Error('checksum mismatch');
         }
       }
+    },
+
+    verifyRemoteCopy: async (sourcePath, destinationPath, mode, context) => {
+      if (mode === 'size') {
+        const [source, destination] = await Promise.all([
+          statRemote(sourcePath, context.sourceSessionId),
+          statRemote(destinationPath, context.destinationSessionId),
+        ]);
+        if (source.size !== destination.size) throw new Error('size mismatch');
+        return;
+      }
+      // 两端分别完整读取并计算 SHA256；任一流不可读都会 reject，绝不降级成 size。
+      const [sourceHash, destinationHash] = await Promise.all([
+        computeRemoteHash(getSftp(context.sourceSessionId).createReadStream(
+          sourcePath,
+          { highWaterMark: SFTP_STREAM_HIGH_WATER_MARK },
+        )),
+        computeRemoteHash(getSftp(context.destinationSessionId).createReadStream(
+          destinationPath,
+          { highWaterMark: SFTP_STREAM_HIGH_WATER_MARK },
+        )),
+      ]);
+      if (sourceHash !== destinationHash) throw new Error('checksum mismatch');
     },
 
     remoteRename: async (from, to, sessionId) => {
@@ -217,7 +242,7 @@ export function createTransferAdapter(
 
 async function computeFileHash(filePath: string): Promise<string> {
   const hash = createHash('sha256');
-  const stream = fs.createReadStream(filePath);
+  const stream = fs.createReadStream(filePath, { highWaterMark: SFTP_STREAM_HIGH_WATER_MARK });
   await pipeline(stream, hash);
   return hash.digest('hex');
 }
@@ -374,15 +399,25 @@ export async function registerTransferRoutes(
     }
   });
 
-  const requireOwnedTask = (req: Request, res: Response): TransferTask | undefined => {
+  const requireOwnedTask = (
+    req: Request,
+    res: Response,
+    allowExplicitRebind = false,
+  ): TransferTask | undefined => {
     const sessionId = requestSessionId(req);
     if (!sessionId) {
       sendError(res, 401, 'SSH_SESSION_REQUIRED', 'An active SSH session is required');
       return undefined;
     }
     const task = engine.getTask(String(req.params.id || ''));
-    if (!task || task.sessionId !== sessionId) {
+    const canRebind = allowExplicitRebind && !task?.sessionId;
+    if (!task || (task.sessionId !== sessionId && !canRebind)) {
       sendError(res, 404, 'TRANSFER_NOT_FOUND', 'Transfer task not found for this SSH session');
+      return undefined;
+    }
+    // 调用方可额外提交 profileId 做严格身份核对；旧客户端的显式 resume 本身即重绑意图。
+    if (canRebind && req.body?.profileId !== undefined && req.body.profileId !== task.profileId) {
+      sendError(res, 403, 'TRANSFER_PROFILE_MISMATCH', 'Transfer task belongs to a different host profile');
       return undefined;
     }
     return task;
@@ -426,7 +461,7 @@ export async function registerTransferRoutes(
     input: ReturnType<typeof parseTransferInput>,
     sessionId: string,
   ): Promise<TransferTask> => {
-    const task = engine.enqueue(input);
+    const task = await engine.enqueueWithSourceFingerprint(input, sessionId);
     // Auto-resume (starts immediately if capacity available)
     await engine.resume(task.id, sessionId);
     return task;
@@ -559,7 +594,7 @@ export async function registerTransferRoutes(
   //  POST /api/transfers/:id/resume
   // -----------------------------------------------------------------------
   app.post('/api/transfers/:id/resume', async (req, res) => {
-    if (!requireOwnedTask(req, res)) return;
+    if (!requireOwnedTask(req, res, true)) return;
 
     try {
       const sessionId = requestSessionId(req);
@@ -592,7 +627,7 @@ export async function registerTransferRoutes(
   //  POST /api/transfers/:id/retry
   // -----------------------------------------------------------------------
   app.post('/api/transfers/:id/retry', async (req, res) => {
-    if (!requireOwnedTask(req, res)) return;
+    if (!requireOwnedTask(req, res, true)) return;
 
     try {
       const sessionId = requestSessionId(req);

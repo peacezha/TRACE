@@ -76,6 +76,8 @@ interface FileTransferWorkspaceProps {
     path: string;
     requestId: number;
   };
+  /** 向主导航报告后台传输活动/失败数量。 */
+  onTransferIndicatorsChange?: (indicators: { active: number; failed: number }) => void;
 }
 
 export default function FileTransferWorkspace({
@@ -90,6 +92,7 @@ export default function FileTransferWorkspace({
   endpoints: endpointsProp,
   pickFolder,
   openLocation,
+  onTransferIndicatorsChange,
 }: FileTransferWorkspaceProps) {
   const [state, dispatch] = useReducer(
     reduceFileTransfer,
@@ -346,7 +349,7 @@ export default function FileTransferWorkspace({
               retryCount: 0,
             })));
             for (const task of tasks) dispatch({ type: 'transfer/upsert', task });
-          } catch (err) { console.error('Failed to enqueue uploads:', err); }
+          } catch (err) { console.error('Failed to enqueue uploads:', err); throw err; }
           return;
         }
 
@@ -379,7 +382,7 @@ export default function FileTransferWorkspace({
               retryCount: 0,
             })));
             for (const task of tasks) dispatch({ type: 'transfer/upsert', task });
-          } catch (err) { console.error('Failed to enqueue downloads:', err); }
+          } catch (err) { console.error('Failed to enqueue downloads:', err); throw err; }
           return;
         }
 
@@ -408,7 +411,7 @@ export default function FileTransferWorkspace({
             retryCount: 0,
           })));
           for (const task of tasks) dispatch({ type: 'transfer/upsert', task });
-        } catch (err) { console.error('Failed to enqueue remote-copies:', err); }
+        } catch (err) { console.error('Failed to enqueue remote-copies:', err); throw err; }
       } catch (err) {
         console.error('Failed to expand transfer sources:', err);
         setTransferError(toDisplayError(err, '文件传输准备失败'));
@@ -754,73 +757,46 @@ export default function FileTransferWorkspace({
     transfersRef.current = state.transfers;
   }, [state.transfers]);
 
-  // Queue handlers — 乐观更新本地状态，真实状态以 socket 推送为准
+  // Queue handlers — 乐观更新；请求失败必须回滚并给出可见错误，不能假成功。
+  const runQueueOperation = useCallback(async (
+    id: string,
+    patch: Partial<TransferTask>,
+    operation: (ownerSessionId: string, taskId: string) => Promise<unknown>,
+    label: string,
+  ) => {
+    const task = transfersRef.current[id];
+    if (!task) return;
+    dispatch({ type: 'transfer/upsert', task: { ...task, ...patch } });
+    const ownerSessionId = task.sessionId || sessionId;
+    if (!ownerSessionId) {
+      dispatch({ type: 'transfer/upsert', task });
+      return;
+    }
+    try {
+      await operation(ownerSessionId, id);
+    } catch (err) {
+      console.error(`Failed to ${label} transfer:`, err);
+      dispatch({ type: 'transfer/upsert', task });
+      setTransferError(`${label}失败：${toDisplayError(err, '请稍后重试')}`);
+      setPaneRefreshToken(token => token + 1);
+    }
+  }, [sessionId]);
+
   const handlePause = useCallback(
-    async (id: string) => {
-      const task = transfersRef.current[id];
-      if (task) {
-        dispatch({ type: 'transfer/upsert', task: { ...task, state: 'paused' } });
-      }
-      const ownerSessionId = task?.sessionId || sessionId;
-      if (!ownerSessionId) return;
-      try {
-        await pauseTransfer(ownerSessionId, id);
-      } catch (err) {
-        console.error('Failed to pause transfer:', err);
-      }
-    },
-    [sessionId],
+    (id: string) => runQueueOperation(id, { state: 'paused' }, pauseTransfer, '暂停'),
+    [runQueueOperation],
   );
-
   const handleResume = useCallback(
-    async (id: string) => {
-      const task = transfersRef.current[id];
-      if (task) {
-        dispatch({ type: 'transfer/upsert', task: { ...task, state: 'queued' } });
-      }
-      const ownerSessionId = task?.sessionId || sessionId;
-      if (!ownerSessionId) return;
-      try {
-        await resumeTransfer(ownerSessionId, id);
-      } catch (err) {
-        console.error('Failed to resume transfer:', err);
-      }
-    },
-    [sessionId],
+    (id: string) => runQueueOperation(id, { state: 'queued' }, resumeTransfer, '继续'),
+    [runQueueOperation],
   );
-
   const handleCancel = useCallback(
-    async (id: string) => {
-      const task = transfersRef.current[id];
-      if (task) {
-        dispatch({ type: 'transfer/upsert', task: { ...task, state: 'cancelled' } });
-      }
-      const ownerSessionId = task?.sessionId || sessionId;
-      if (!ownerSessionId) return;
-      try {
-        await cancelTransfer(ownerSessionId, id);
-      } catch (err) {
-        console.error('Failed to cancel transfer:', err);
-      }
-    },
-    [sessionId],
+    (id: string) => runQueueOperation(id, { state: 'cancelled' }, cancelTransfer, '停止'),
+    [runQueueOperation],
   );
-
   const handleRetry = useCallback(
-    async (id: string) => {
-      const task = transfersRef.current[id];
-      if (task) {
-        dispatch({ type: 'transfer/upsert', task: { ...task, state: 'queued', transferredBytes: 0, bytesPerSecond: 0 } });
-      }
-      const ownerSessionId = task?.sessionId || sessionId;
-      if (!ownerSessionId) return;
-      try {
-        await retryTransfer(ownerSessionId, id);
-      } catch (err) {
-        console.error('Failed to retry transfer:', err);
-      }
-    },
-    [sessionId],
+    (id: string) => runQueueOperation(id, { state: 'queued', transferredBytes: 0, bytesPerSecond: 0 }, retryTransfer, '重试'),
+    [runQueueOperation],
   );
 
   const handlePauseAll = useCallback(() => {
@@ -846,17 +822,17 @@ export default function FileTransferWorkspace({
     void Promise.allSettled(ids.map(handleCancel));
   }, [handleCancel]);
 
-  const handleClearCompleted = useCallback(() => {
-    const completedIds = Object.values(state.transfers)
-      .filter((t) => t.state === 'completed' || t.state === 'cancelled')
-      .map((t) => t.id);
-    for (const id of completedIds) {
-      dispatch({ type: 'transfer/removed', id });
-    }
-    if (sessionId) {
-      clearCompletedTransfers(sessionId).catch(err =>
-        console.error('Failed to clear completed transfers:', err),
-      );
+  const handleClearCompleted = useCallback(async () => {
+    const completed = Object.values(state.transfers)
+      .filter(task => task.state === 'completed' || task.state === 'cancelled');
+    for (const task of completed) dispatch({ type: 'transfer/removed', id: task.id });
+    const sessionIds = new Set(completed.map(task => task.sessionId || sessionId).filter(Boolean) as string[]);
+    try {
+      await Promise.all([...sessionIds].map(ownerSessionId => clearCompletedTransfers(ownerSessionId)));
+    } catch (err) {
+      for (const task of completed) dispatch({ type: 'transfer/upsert', task });
+      setTransferError(`清除失败：${toDisplayError(err, '请稍后重试')}`);
+      setPaneRefreshToken(token => token + 1);
     }
   }, [state.transfers, sessionId]);
 
@@ -906,7 +882,8 @@ export default function FileTransferWorkspace({
     [handleRemoteNavigate],
   );
 
-  const connected = Boolean(state.activeProfileId || sessionId);
+  // 本地工作台没有 SSH 会话，但本地文件窗格仍应直接可用。
+  const connected = Boolean(state.activeProfileId || sessionId || endpoints.some(endpoint => endpoint.id === 'local'));
 
   // 任务数组 memo：仅 transfers 变化时重建，
   // 保证 TransferQueue 的过滤 useMemo 与 TaskRow 的 React.memo 生效
@@ -914,6 +891,10 @@ export default function FileTransferWorkspace({
     () => Object.values(state.transfers),
     [state.transfers],
   );
+
+  useEffect(() => {
+    onTransferIndicatorsChange?.({ active: state.summary.active, failed: state.summary.failed });
+  }, [onTransferIndicatorsChange, state.summary.active, state.summary.failed]);
 
   // Auto-navigate panes to default paths when connected / endpoint switched
   useEffect(() => {
@@ -1010,7 +991,7 @@ export default function FileTransferWorkspace({
         </div>
         {transferError && (
           <div className="px-4 py-2 border-b border-red-500/30 bg-red-500/10 text-xs text-red-300 flex items-center justify-between gap-3">
-            <span className="break-words">传输未启动：{transferError}</span>
+            <span className="break-words" role="alert">{transferError}</span>
             <button type="button" className="shrink-0 hover:text-white" onClick={() => setTransferError('')} aria-label="关闭错误">×</button>
           </div>
         )}

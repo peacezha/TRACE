@@ -26,6 +26,9 @@ export function encryptSecret(plain: string): string {
   if (plain.startsWith(PREFIX)) return plain;
   const key = loadKey();
   if (!key) {
+    if (process.env.TRACE_DESKTOP_TOKEN) {
+      throw new Error('桌面加密密钥不可用，已拒绝明文落盘');
+    }
     warnNoKeyOnce();
     return plain;
   }

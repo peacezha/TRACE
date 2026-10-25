@@ -152,6 +152,7 @@ let totpSecretCache: string | null = null;
 export function getStoredSecret(): string {
   if (isPublicWeb()) return '';
   if (totpSecretCache !== null) return totpSecretCache;
+  if (desktopSecrets()) return '';
   try {
     const stored = localStorage.getItem(TOTP_SECRET_STORAGE_KEY);
     if (stored) return stored;
@@ -166,9 +167,10 @@ export function storeSecret(secret: string): void {
     totpSecretCache = secret;
     const write = secret ? desktop.set("totpSecret", secret) : desktop.delete("totpSecret");
     write.catch(err => {
-      console.warn("[totpStorage] 加密存储写入失败，回退 localStorage:", err);
-      totpSecretCache = null;
-      try { localStorage.setItem(TOTP_SECRET_STORAGE_KEY, secret); } catch { /* localStorage unavailable */ }
+      console.warn("[totpStorage] 加密存储写入失败，仅保留内存值:", err);
+      window.dispatchEvent(new CustomEvent('trace-persistence-error', {
+        detail: 'TOTP 种子保存到桌面加密存储失败，当前仅在内存中生效，重启后需重新配置。',
+      }));
     });
     return;
   }
@@ -207,6 +209,7 @@ let savedPasswordCache: string | null = null;
 export function getSavedPassword(): string {
   if (isPublicWeb()) return '';
   if (savedPasswordCache !== null) return savedPasswordCache;
+  if (desktopSecrets()) return '';
   try {
     return localStorage.getItem(SAVED_PASSWORD_KEY) || "";
   } catch {
@@ -221,12 +224,10 @@ export function savePassword(password: string): void {
     savedPasswordCache = password;
     const write = password ? desktop.set("clusterPassword", password) : desktop.delete("clusterPassword");
     write.catch(err => {
-      console.warn("[totpStorage] 加密存储写入失败，回退 localStorage:", err);
-      savedPasswordCache = null;
-      try {
-        if (password) localStorage.setItem(SAVED_PASSWORD_KEY, password);
-        else localStorage.removeItem(SAVED_PASSWORD_KEY);
-      } catch { /* localStorage unavailable */ }
+      console.warn("[totpStorage] 加密存储写入失败，仅保留内存值:", err);
+      window.dispatchEvent(new CustomEvent('trace-persistence-error', {
+        detail: '集群密码保存到桌面加密存储失败，当前仅在内存中生效，重启后需重新输入。',
+      }));
     });
     return;
   }
@@ -286,7 +287,12 @@ export async function hydrateTotpStorage(): Promise<void> {
       savedPasswordCache = legacyPassword;
     }
   } catch (err) {
-    // 水合失败（如加密不可用）：保持 localStorage 现状，功能不中断
-    console.warn("[totpStorage] 加密存储水合失败，回退 localStorage:", err);
+    // 生产桌面端不得因 safeStorage 故障回退到 localStorage 明文。
+    totpSecretCache = '';
+    savedPasswordCache = '';
+    console.warn("[totpStorage] 加密存储水合失败，仅使用内存值:", err);
+    window.dispatchEvent(new CustomEvent('trace-persistence-error', {
+      detail: '桌面加密存储不可用，TOTP 种子和集群密码仅保留在当前内存中，不会读取或写入明文存储。',
+    }));
   }
 }

@@ -33,7 +33,7 @@ interface ProcessEntry {
   command: string;
 }
 
-type SchedulerType = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+type SchedulerType = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
 
 const SCHEDULER_LABELS: Record<SchedulerType, string> = {
   lsf: 'LSF',
@@ -41,11 +41,12 @@ const SCHEDULER_LABELS: Record<SchedulerType, string> = {
   pbs: 'PBS',
   donau: 'Donau',
   none: '无调度器',
+  unknown: '调度器未知',
 };
 
-/** 后端探测值放宽到五类;未知值按 lsf 展示(老版本默认)。 */
+/** 未识别或探测失败不得回退成 LSF；legacy 空值才保留旧默认。 */
 function normalizeSchedulerType(value: unknown): SchedulerType {
-  return value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' ? value : 'lsf';
+  return value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' || value === 'unknown' ? value : 'lsf';
 }
 
 interface NotifyConfig {

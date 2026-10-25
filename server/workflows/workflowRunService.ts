@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appPath } from '../paths';
 import { renderWorkflowCommand, type Workflow } from './workflowTypes';
-import { translateSchedulerDirectives } from '../notifications/scheduler';
+import { querySchedulerJobStates, translateSchedulerDirectives } from '../notifications/scheduler';
+import type { SchedulerKind } from '../cluster/schedulerProfile';
 import { reconcileRunsWithScheduler } from './runAnnotate';
 import { workflowSlug } from '../../shared/flowManifest';
 import { localizeWorkflowMetadata, normalizeReportLanguage, reportCommandForLanguage } from '../../shared/workflowLocale';
@@ -35,8 +36,8 @@ export function resolveAssetLocalPath(source: string): string {
 /** createWorkflowRun 的可选部署上下文：有 sftp 时把 workflow.assets 上传进 RUN 目录。 */
 export interface CreateRunDeployContext {
   sftp?: { fastPut: (localPath: string, remotePath: string, cb: (err?: Error) => void) => void } | undefined;
-  /** 目标集群调度器：非 LSF 时步骤脚本里的 #BSUB 指令会被翻译（#SBATCH/#PBS/剥除；donau 暂按剥除处理）。 */
-  scheduler?: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+  /** 目标集群调度器：非 LSF 时步骤脚本里的 #BSUB 指令会被翻译；未知或不支持的资源约束会拒绝创建。 */
+  scheduler?: SchedulerKind;
 }
 
 const RUN_STATUSES = new Set<WorkflowRunStatus>([
@@ -182,7 +183,7 @@ export function buildWorkflowStepScript(
   config: WorkflowRunConfig,
   stepNumber: number,
   runDir: string,
-  scheduler: 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' = 'lsf',
+  scheduler: SchedulerKind = 'lsf',
 ): string {
   const step = workflow.steps[stepNumber - 1];
   if (!step) throw new Error(`步骤不存在: ${stepNumber}`);
@@ -196,12 +197,10 @@ export function buildWorkflowStepScript(
       .trim(),
     scheduler,
   );
-  // LSF/Slurm 只识别脚本首个可执行语句之前的调度器指令。流程模板通常以
-  // #BSUB/#SBATCH 开头，因此必须把它们放到 shebang 后、set 命令前；否则
-  // `bsub < step-NN.sh` 会悄悄忽略队列、核数和作业名。
+  // 调度器只识别脚本首个可执行语句之前的指令，统一放到 shebang 后、set 命令前。
   const renderedLines = rendered.split(/\r?\n/);
-  const schedulerDirectives = renderedLines.filter(line => /^\s*#(?:BSUB|SBATCH)\b/.test(line));
-  const renderedBody = renderedLines.filter(line => !/^\s*#(?:BSUB|SBATCH)\b/.test(line)).join('\n').trim();
+  const schedulerDirectives = renderedLines.filter(line => /^\s*#(?:BSUB|SBATCH|DSUB|PBS)\b/.test(line));
+  const renderedBody = renderedLines.filter(line => !/^\s*#(?:BSUB|SBATCH|DSUB|PBS)\b/.test(line)).join('\n').trim();
   const unresolved = [...rendered.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)].map(match => match[1]);
   const uniqueUnresolved = [...new Set(unresolved)];
   return [
@@ -530,12 +529,32 @@ function cleanStringList(value: unknown): string[] | undefined {
   return value.map(String).map(s => s.trim()).filter(Boolean).slice(0, 200);
 }
 
+async function assertLifecycleJobsTerminal(
+  exec: RunExec,
+  scheduler: SchedulerKind | undefined,
+  jobIds: string[],
+  action: '重跑' | '取消',
+): Promise<void> {
+  const ids = [...new Set(jobIds)];
+  if (ids.length === 0) return;
+  if (!scheduler || scheduler === 'unknown' || scheduler === 'none') {
+    throw new Error(`无法${action}：当前调度器无法核实 ${ids.length} 个作业状态，已保持原运行状态`);
+  }
+  const states = await querySchedulerJobStates(exec, scheduler, ids);
+  const unsafe = ids.map(jobId => ({ jobId, state: states[jobId] ?? 'UNKNOWN' }))
+    .filter(item => item.state !== 'DONE' && item.state !== 'EXIT');
+  if (unsafe.length > 0) {
+    const detail = unsafe.map(item => `${item.jobId}=${item.state}`).join('、');
+    throw new Error(`无法${action}：作业仍为 RUN/PEND/UNKNOWN 或无法核实（${detail}），已保持原运行状态`);
+  }
+}
+
 export async function updateWorkflowRun(
   exec: RunExec,
   home: string,
   runDir: string,
   patch: WorkflowRunPatch,
-  options: { acknowledgeFailedQc?: boolean } & RunIoTimeouts = {},
+  options: { acknowledgeFailedQc?: boolean; scheduler?: SchedulerKind } & RunIoTimeouts = {},
 ): Promise<WorkflowRun> {
   const safeDir = resolveWorkflowRunDir(home, runDir);
   if (!safeDir) throw new Error('非法流程运行目录');
@@ -545,6 +564,20 @@ export async function updateWorkflowRun(
     throw new Error(`流程状态已被其他操作更新（期望 revision ${patch.expectedRevision}，当前 ${run.revision}），请刷新后重试`);
   }
   const now = Date.now();
+
+  const restarting = Number.isInteger(patch.restartFromStep);
+  const cancelling = patch.status === 'cancelled';
+  if (restarting || cancelling) {
+    const affectedSteps = restarting
+      ? run.steps.filter(step => step.n >= Number(patch.restartFromStep))
+      : run.steps;
+    await assertLifecycleJobsTerminal(
+      exec,
+      options.scheduler,
+      affectedSteps.flatMap(step => step.jobIds || []),
+      restarting ? '重跑' : '取消',
+    );
+  }
 
   if (Number.isInteger(patch.restartFromStep)) {
     const restartFromStep = Number(patch.restartFromStep);
@@ -666,7 +699,7 @@ export async function updateWorkflowRun(
     run.error = qcPauseReason(run);
     delete run.endedAt;
   }
-  if (!qcBlocked && run.steps.length > 0 && run.steps.every(s => s.status === 'done' || s.status === 'skipped')) {
+  if (run.status !== 'cancelled' && !qcBlocked && run.steps.length > 0 && run.steps.every(s => s.status === 'done' || s.status === 'skipped')) {
     run.status = 'done';
     run.currentStep = run.totalSteps;
     run.endedAt ??= now;

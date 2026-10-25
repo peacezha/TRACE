@@ -705,7 +705,9 @@ const httpServer = createServer(app);
 const io = new SocketIOServer(httpServer, {
   path: '/socket.io',
   cors: { origin: webAccessConfig.enabled ? webAccessConfig.origin || false : '*' },
-  allowRequest: (req, callback) => callback(null, !webAccessConfig.enabled || webAccess.originAllowed(req.headers.origin)),
+  allowRequest: (req, callback) => callback(null,
+    (!DESKTOP_TOKEN || req.headers['x-trace-desktop-token'] === DESKTOP_TOKEN)
+      && (!webAccessConfig.enabled || webAccess.originAllowed(req.headers.origin))),
 });
 
 const WORKFLOW_RUN_UPDATED_EVENT = 'workflow:run-updated';
@@ -738,6 +740,8 @@ if (webAccessConfig.enabled && process.env.TRACE_TRUST_PROXY === '1') app.set('t
 if (PUBLIC_WORKER) app.set('trust proxy', 'loopback');
 app.use(sessionMiddleware);
 app.use(workerAuthentication);
+// Desktop mode protects every application API; /healthz and static assets stay public.
+app.use('/api', requireDesktopToken);
 app.use(webAccess.middleware);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));

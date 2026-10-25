@@ -258,6 +258,9 @@ export function registerNotificationRoutes(
         success: true,
         config: {
           ...config,
+          sendKey: config.sendKey ? '******' : '',
+          token: config.token ? '******' : '',
+          webhook: config.webhook ? '******' : '',
           smtpPass: config.smtpPass ? '******' : '',
         },
       });
@@ -275,13 +278,16 @@ export function registerNotificationRoutes(
       const next: NotifyConfig = {
         enabled: Boolean(body.enabled),
         channel,
-        sendKey: body.sendKey !== undefined ? String(body.sendKey || '').trim() : current.sendKey,
-        token: body.token !== undefined ? String(body.token || '').trim() : current.token,
-        webhook: body.webhook !== undefined ? String(body.webhook || '').trim() : current.webhook,
+        // '******' 表示未修改，保留原值；所有密钥均不在 API 中回传明文。
+        sendKey: body.sendKey === '******' ? current.sendKey
+          : body.sendKey !== undefined ? String(body.sendKey || '').trim() : current.sendKey,
+        token: body.token === '******' ? current.token
+          : body.token !== undefined ? String(body.token || '').trim() : current.token,
+        webhook: body.webhook === '******' ? current.webhook
+          : body.webhook !== undefined ? String(body.webhook || '').trim() : current.webhook,
         smtpHost: body.smtpHost !== undefined ? String(body.smtpHost || '').trim() : current.smtpHost,
         smtpPort: body.smtpPort !== undefined ? Number(body.smtpPort) || 465 : current.smtpPort,
         smtpUser: body.smtpUser !== undefined ? String(body.smtpUser || '').trim() : current.smtpUser,
-        // '******' 表示未修改，保留原值
         smtpPass: body.smtpPass === '******' ? current.smtpPass
           : body.smtpPass !== undefined ? String(body.smtpPass || '').trim()
           : current.smtpPass,

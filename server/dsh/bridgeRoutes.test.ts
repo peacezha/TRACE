@@ -1,7 +1,11 @@
 import express, { type Express } from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { JobSubmissionGuard } from '../ai/jobSubmissionGuard';
 import {
   registerBridgeRoutes,
   setJobPollIntervalMs,
@@ -40,6 +44,13 @@ function makeDeps(overrides: Partial<BridgeRouteDeps> = {}): BridgeRouteDeps {
 }
 
 const servers: Server[] = [];
+const ledgerRoots: string[] = [];
+
+function makeGuard(): JobSubmissionGuard {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-submit-guard-'));
+  ledgerRoots.push(root);
+  return new JobSubmissionGuard(root);
+}
 
 async function startApp(deps: BridgeRouteDeps): Promise<string> {
   const app: Express = express();
@@ -58,6 +69,7 @@ afterEach(async () => {
     const server = servers.pop()!;
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+  for (const root of ledgerRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 async function post(base: string, urlPath: string, body: unknown, token?: string, dshSession = DSH_SESSION): Promise<{ status: number; body: any }> {
@@ -430,5 +442,68 @@ describe('bridge interaction endpoints (sdk channel)', () => {
     }));
     const res = await post(base, '/api/bridge/interaction/questions', { sessionId: 'dsh-1', requestId: 'q-3', questions: [{ id: 'x', question: '?' }] }, TOKEN);
     expect(res.status).toBe(409);
+  });
+});
+
+describe('bridgeRoutes submission outcome guard', () => {
+  it('persists SSH timeout as unknown and unlocks only after explicit confirmation', async () => {
+    const guard = makeGuard();
+    const exec = vi.fn()
+      .mockRejectedValueOnce(new Error('SSH connection timed out'))
+      .mockResolvedValueOnce('Job <12345> is submitted to queue <normal>.');
+    const base = await startApp(makeDeps({
+      getSession: () => makeSession({ exec }), jobSubmissionGuard: guard,
+    }));
+    const command = 'bsub -q normal "sleep 300"';
+    const first = await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(first.body).toMatchObject({ ok: false, code: 'submission_result_unknown' });
+    expect(first.body.error).toContain('先用调度器');
+    expect(first.body.error).toContain('不能盲目重试');
+    expect(guard.list()[0]?.state).toBe('unknown');
+
+    const retry = await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(retry.status).toBe(428);
+    expect(retry.body).toMatchObject({ error: 'confirmation_required', code: 'submission_result_unknown' });
+    expect(exec).toHaveBeenCalledTimes(1);
+
+    const confirmed = await post(base, '/api/bridge/exec', { command, confirmed: true }, TOKEN);
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.ok).toBe(true);
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(guard.list()[0]?.state).toBe('submitted');
+  });
+
+  it('keeps a successful command without a recognizable receipt unknown', async () => {
+    const guard = makeGuard();
+    const exec = vi.fn(async () => 'submission accepted, id unavailable\n');
+    const base = await startApp(makeDeps({
+      getSession: () => makeSession({ exec }), jobSubmissionGuard: guard,
+    }));
+    const command = 'bsub -q normal "sleep 300"';
+    const first = await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(first.body).toMatchObject({ ok: false, code: 'submission_result_unknown' });
+    expect(first.body.output).toContain('id unavailable');
+    expect(guard.list()[0]?.state).toBe('unknown');
+    await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases only a definite scheduler rejection so a corrected retry can execute', async () => {
+    const guard = makeGuard();
+    const exec = vi.fn()
+      .mockRejectedValueOnce(new Error('Command exited with code 1: bsub: queue does not exist'))
+      .mockResolvedValueOnce('Job <12345> is submitted to queue <normal>.');
+    const base = await startApp(makeDeps({
+      getSession: () => makeSession({ exec }), jobSubmissionGuard: guard,
+    }));
+    const command = 'bsub -q normal "sleep 300"';
+    const rejected = await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(rejected.body).toMatchObject({ ok: false, code: 'submission_rejected' });
+    expect(rejected.body.error).toContain('尚未提交作业');
+    expect(guard.list()).toEqual([]);
+
+    const retry = await post(base, '/api/bridge/exec', { command }, TOKEN);
+    expect(retry.body.ok).toBe(true);
+    expect(exec).toHaveBeenCalledTimes(2);
   });
 });

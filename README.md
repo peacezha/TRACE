@@ -1,52 +1,85 @@
-# TRACE —— HPC 集群智能工作台
+<div align="center">
 
-面向生物信息与高性能计算场景的桌面客户端：AI 智能体 + 集群作业管理 + 文件传输 + 生信分析流程库，开箱即用。
+# TRACE
 
-## 下载安装（推荐给绝大多数用户）
+**有人监督的 HPC 与生物信息科研辅助工作台**
 
-**[⬇️ 点击下载 TRACE 最新版（Windows x64 安装包）](https://github.com/peacezha/TRACE/releases/latest)**
+将 AI Agent、集群作业、文件传输与可复用分析流程集中在同一个工作台。
 
-下载 `TRACE-Setup-<版本>-x64.exe` 后双击安装即可，**无需安装 Node.js 或任何其他依赖**。
+[![Version](https://img.shields.io/badge/version-v0.5.14-0969da)](https://github.com/peacezha/TRACE/releases/tag/v0.5.14)
+[![Platforms](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-supported-2ea44f)](https://github.com/peacezha/TRACE/releases/tag/v0.5.14)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml/badge.svg)](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml)
 
-> 历史版本与校验信息见 [Releases 页面](https://github.com/peacezha/TRACE/releases)。
+**[下载 v0.5.14](https://github.com/peacezha/TRACE/releases/tag/v0.5.14)** · [快速开始](#快速开始) · [部署文档](#开发与文档)
 
-当前本地 Windows 构建为 v0.4.56，完整统一 TRACE 名称、插件与新生成目录，并提供旧数据迁移；包含 v0.4.55 的问答防循环和有效执行计时修复。本地构建尚未发布到 GitHub，线上最新版本以 Releases 页面为准。[完整改名说明](docs/windows-v0.4.56-complete-trace.md) · [Agent 修复说明](docs/windows-v0.4.55-agent-continuity.md)。
+</div>
 
-Mac（Apple 芯片 / Intel）和公共 Linux 网页包仍使用 [v0.4.43](https://github.com/peacezha/TRACE/releases/tag/v0.4.43)。文献学习的数据下载和完整流程修复继续包含在 Windows 新版本中。[上一版说明](v0.4.43_更新说明.md) · [Mac 安装说明](docs/MAC_WEB_DEPLOYMENT.md)。
+<p align="center">
+  <img src="docs/figures/preset_and_custom_workflows_en.png" alt="TRACE 预置流程与自定义流程工作台" width="960">
+</p>
 
-面向大众的网页服务请选择 **public-web-linux-x64-node20** 包（Node.js 20.19.5+）：[npm 公共网页部署说明](docs/PUBLIC_WEB_DEPLOYMENT.md)。用户自带集群账号和 API Key，无统一网站口令，无部署服务器本地工作台；旧 `web-linux-x64` 包仍是单用户私有版。
+## 最新下载
 
-## 快速上手
+| 版本 | 适用场景 | 下载 |
+| --- | --- | --- |
+| Windows x64 | Windows 10/11 桌面安装 | [TRACE-Setup-0.5.14-x64.exe](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-Setup-0.5.14-x64.exe) |
+| macOS Apple silicon | arm64 桌面版 | [TRACE-0.5.14-mac-arm64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-mac-arm64.dmg) |
+| macOS Intel | x64 桌面版 | [TRACE-0.5.14-mac-x64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-mac-x64.dmg) |
+| 私有网页 | Linux x64，Docker，单用户可信环境 | [TRACE-0.5.14-web-linux-x64.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-web-linux-x64.tar.gz) |
+| 公共网页 | Linux x64，Node.js/npm，多访客 | [TRACE-0.5.14-public-web-linux-x64-node20.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-public-web-linux-x64-node20.tar.gz) |
 
-1. 启动 TRACE，输入集群地址、端口、用户名和密码（首次连接需确认主机指纹）；
-2. 登录后即可使用：AI 对话与任务执行、SSH 终端、集群与本地文件互传、流程库一键运行；
-3. 在流程库选择分析流程，先检查输入、软件和参考数据，再确认参数。来源分别标注 ENCODE 官方流程、参考扩展实现、BioSkills 和用户自建流程。
+桌面安装包无需另装 Node.js。SHA-256 校验文件与历史版本见 [Releases](https://github.com/peacezha/TRACE/releases)。macOS 包**未签名、未公证**；网页包的部署方式不同，请分别阅读 [macOS / 私有网页](docs/MAC_WEB_DEPLOYMENT.md) 与 [公共网页](docs/PUBLIC_WEB_DEPLOYMENT.md) 指南。
 
-## 功能一览
+## 核心能力
 
-- **AI 智能体**：对话式驱动集群作业（提交、监控、自动续跑、完成后自动分析结果），支持本地文件分析（无集群也能用）；
-- **流程库**：ENCODE 金标准流程（RNA-seq / ChIP-seq / ATAC-seq / WGBS / Hi-C 等 12 条）+ 35 条精选 BioSkills 流程；固定脚本 + 全局参数微调；植物样本适配（叶绿体去除）；
-- **集群工作台**：LSF 作业提交/监控/排障，终端右键菜单与 AI 辅助小窗；
-- **文件传输**：集群与本地双向互传、远程文件在线编辑同步；
-- **网络数据资源**：内置 NCBI / Ensembl / UniProt 等公共数据库接口，AI 可直接查询序列与注释。
+- **AI 科研辅助**：对话、命令与工具调用、作业监控、断点恢复和结果整理；关键操作保留人工确认。
+- **可复用流程**：预置 ENCODE 参考流程、BioSkills 与自定义流程，支持参数检查、资产部署、步骤状态和 QC 记录。
+- **集群工作台**：SSH 终端、LSF 等调度环境的作业提交与监控，连接时校验主机指纹。
+- **文件与数据**：本地/集群文件浏览与双向传输、远程编辑，以及公共生物数据资源查询。
+- **桌面与网页**：桌面端提供原生文件和系统能力；公共网页按访客隔离集群连接，不开放部署机本地工作台。
 
-## 从源码构建（开发者）
+## 快速开始
+
+1. 根据上表安装桌面版，或按部署指南启动网页服务。
+2. 使用自己的集群 SSH 账号连接，核对并接受主机指纹；配置自己的模型 API 地址与 API Key。
+3. 从流程库选择流程，检查输入数据、软件、参考数据和参数，再确认执行。
+4. 持续监督命令、作业与资源消耗；完成后检查日志、QC 和产物，不以 `DONE` 替代科学验收。
+
+## 支持矩阵
+
+| 形态 | 平台与运行时 | 使用边界 |
+| --- | --- | --- |
+| Windows 桌面 | Windows 10/11 x64 | 当前系统用户；本地文件与命令具有桌面应用权限 |
+| macOS 桌面 | Apple silicon / Intel | 未签名、未公证；手动下载更新 |
+| 私有网页 | Linux x64；Docker Engine + Compose 插件 | **单用户、单实例**；不可提供给不互信用户 |
+| 公共网页 | Linux x64；Node.js 20.19.5+ 与 npm | 多访客；用户自带集群账号和 API Key，无统一网站口令 |
+
+## 安全边界
+
+TRACE 是**有人监督的科研辅助工具**，不是无人值守的科学结论生成器。用户须审查命令、流程来源、输入、参考数据、QC 与最终结果。
+
+- 集群权限来自用户自己的 SSH 账号；TRACE 不绕过集群授权，也不提供通用命令沙箱。
+- 私有网页可执行部署容器内的本地操作，仅限可信单用户；公共网页禁用部署机本地文件/命令和 DSH。
+- 网页后端执行请求时需要接触凭据。公共网页的个人状态保存在用户集群中，其文件权限不能防住集群管理员或网站运维方。
+- 公网部署必须使用 HTTPS、限制后端端口并妥善备份；不要把网页服务直接暴露为明文 HTTP。
+
+## 开发与文档
 
 ```bash
-npm install          # 安装依赖
-npm run dev          # 开发模式
-npm run test         # 运行回归测试
-npm run electron:dist  # 打包 Windows 安装包（输出到 release/）
+npm ci
+npm run dev
+npm run lint
+npm test
 ```
 
-技术栈：Electron + React + TypeScript + Express。详见 [开发总说明](docs/DEVELOPMENT_GUIDE.md)。
+CI 使用 Node.js 22.17.1 构建桌面安装包。技术栈为 Electron、React、TypeScript 与 Express。
 
-## 文档
-
-- [ENCODE 流程设计与质控阈值解读](docs/ENCODE生物信息分析与质控流程.md)
-- [ENCODE 流程与代码全文](docs/ENCODE流程与代码全文_v0.4.12.md)
+- [开发总说明](docs/DEVELOPMENT_GUIDE.md)
+- [macOS 安装与私有网页 Docker 部署](docs/MAC_WEB_DEPLOYMENT.md)
+- [公共网页 npm 部署](docs/PUBLIC_WEB_DEPLOYMENT.md)
 - [流程自动化约定](docs/FLOW_AUTOMATION.md)
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © 2026 peacezha

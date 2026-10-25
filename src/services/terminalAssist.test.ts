@@ -55,6 +55,21 @@ describe('analyzeTerminalSelection', () => {
     expect(result.actions.map(a => a.command)).toEqual(['bjobs 582301', 'bpeek 582301', 'bkill 582301']);
   });
 
+  it('按当前调度器生成 Slurm / PBS / Donau / 无调度器作业命令，未知时不猜 LSF', () => {
+    expect(analyzeTerminalSelection('582301', 'slurm').actions.map(a => a.command))
+      .toEqual(['squeue -j 582301', 'scontrol show job 582301', 'scancel 582301']);
+    expect(analyzeTerminalSelection('582301', 'pbs').actions.map(a => a.command))
+      .toEqual(['qstat 582301', 'tracejob 582301', 'qdel 582301']);
+    expect(analyzeTerminalSelection('582301', 'donau').actions.map(a => a.command))
+      .toEqual(['djob 582301', 'dpeek 582301', 'dkill 582301']);
+    expect(analyzeTerminalSelection('582301', 'none').actions.map(a => a.command))
+      .toEqual(['ps -p 582301 -f', 'ps -p 582301 -f', 'kill 582301']);
+    expect(analyzeTerminalSelection('582301', 'LSF').actions.map(a => a.command))
+      .toEqual(['bjobs 582301', 'bpeek 582301', 'bkill 582301']);
+    expect(analyzeTerminalSelection('582301', 'unknown').actions[0].ai).toBe('explain');
+    expect(resolveAssistIntent('终止', analyzeTerminalSelection('582301', 'unknown'), 'unknown').kind).toBe('ai');
+  });
+
   it('位数不符（4 位 / 10 位）不算作业号', () => {
     expect(analyzeTerminalSelection('1234').kind).toBe('text');
     expect(analyzeTerminalSelection('1234567890').kind).toBe('text');

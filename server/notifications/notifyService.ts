@@ -1,5 +1,5 @@
 // 通知服务：作业完成时通过 Server酱 / PushPlus / 企业微信 / 邮件 提醒用户。
-// smtpPass（邮箱授权码）落盘为 AES-256-GCM 密文（secretBox），历史明文读取时透传。
+// sendKey/token/webhook/smtpPass 均落盘为 AES-256-GCM 密文（secretBox），历史明文读取后自动迁移。
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
@@ -32,25 +32,44 @@ export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
   channel: 'serverchan',
 };
 
+const SECRET_FIELDS = ['sendKey', 'token', 'webhook', 'smtpPass'] as const;
+
 export async function loadNotifyConfig(): Promise<NotifyConfig> {
+  let stored: NotifyConfig;
   try {
     const raw = await fs.readFile(CONFIG_PATH, 'utf-8');
-    const config: NotifyConfig = { ...DEFAULT_NOTIFY_CONFIG, ...JSON.parse(raw) };
-    // 落盘密文 → 内存明文；历史明文原样透传
-    if (config.smtpPass) config.smtpPass = decryptSecret(config.smtpPass);
-    return config;
+    stored = { ...DEFAULT_NOTIFY_CONFIG, ...JSON.parse(raw) };
   } catch {
     return { ...DEFAULT_NOTIFY_CONFIG };
   }
+
+  const config = { ...stored };
+  let needsMigration = false;
+  for (const field of SECRET_FIELDS) {
+    const value = stored[field];
+    if (!value) continue;
+    if (encryptSecret(value) !== value) needsMigration = true;
+    config[field] = decryptSecret(value);
+  }
+  if (needsMigration) {
+    try { await saveNotifyConfig(config); }
+    catch (err) { console.warn('[notifyService] 历史明文密钥迁移失败:', err); }
+  } else {
+    await fs.chmod(CONFIG_PATH, 0o600).catch(() => { /* Windows/不支持 chmod 的文件系统 */ });
+  }
+  return config;
 }
 
 export async function saveNotifyConfig(config: NotifyConfig): Promise<void> {
-  await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-  // 授权码加密落盘；encryptSecret 对空值/已加密值原样返回
-  const toWrite = config.smtpPass ? { ...config, smtpPass: encryptSecret(config.smtpPass) } : config;
+  await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
+  const toWrite = { ...config };
+  for (const field of SECRET_FIELDS) {
+    if (toWrite[field]) toWrite[field] = encryptSecret(toWrite[field]);
+  }
   const tmp = `${CONFIG_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(toWrite, null, 2), 'utf-8');
+  await fs.writeFile(tmp, JSON.stringify(toWrite, null, 2), { encoding: 'utf-8', mode: 0o600 });
   await fs.rename(tmp, CONFIG_PATH);
+  await fs.chmod(CONFIG_PATH, 0o600);
 }
 
 function formEncode(fields: Record<string, string>): string {

@@ -218,9 +218,13 @@ describe('Donau（多瑙）调度器', () => {
     expect(submitCommand('donau', '/r/code/step-01.sh')).toBe("chmod +x '/r/code/step-01.sh' && dsub -s '/r/code/step-01.sh'");
   });
 
-  it('translateSchedulerDirectives 对 donau 剥掉 #BSUB 指令（#DSUB 翻译未接入）', () => {
-    const script = '#!/bin/bash\n#BSUB -J x\n#BSUB -n 8\necho hi\n';
+  it('translateSchedulerDirectives 映射 Donau 作业名、核数、队列和输出', () => {
+    const script = '#!/bin/bash\n#BSUB -J x\n#BSUB -n 8\n#BSUB -q arm\n#BSUB -o result.log\necho hi\n';
     const out = translateSchedulerDirectives(script, 'donau');
+    expect(out).toContain('#DSUB -n x');
+    expect(out).toContain('#DSUB -R cpu=8');
+    expect(out).toContain('#DSUB -q arm\n#DSUB -aa');
+    expect(out).toContain('#DSUB -o result.log');
     expect(out).not.toContain('#BSUB');
     expect(out).toContain('echo hi');
   });
@@ -228,5 +232,33 @@ describe('Donau（多瑙）调度器', () => {
   it('donauOutputTailCommand 用 dpeek 取尾部，非法作业号降级为 false', () => {
     expect(donauOutputTailCommand('123')).toBe('dpeek 123 2>/dev/null | tail -n 30');
     expect(donauOutputTailCommand('x;id')).toBe('false');
+  });
+});
+
+describe('跨调度器指令安全翻译', () => {
+  it('LSF [hour:]minute walltime 正确转为 Slurm/PBS 格式', () => {
+    expect(translateSchedulerDirectives('#BSUB -W 90', 'slurm')).toBe('#SBATCH --time=01:30:00');
+    expect(translateSchedulerDirectives('#BSUB -W 2:05', 'slurm')).toBe('#SBATCH --time=02:05:00');
+    expect(translateSchedulerDirectives('#BSUB -W 120', 'pbs')).toBe('#PBS -l walltime=02:00:00');
+    expect(() => translateSchedulerDirectives('#BSUB -W 2:75', 'slurm')).toThrow('walltime');
+  });
+
+  it('LSF -M 的 KB 与 rusage[mem] 的 MB 分别转换，不把数值放大 1024 倍', () => {
+    expect(translateSchedulerDirectives('#BSUB -M 4096', 'pbs')).toBe('#PBS -l mem=4MB');
+    expect(translateSchedulerDirectives('#BSUB -M 4096', 'slurm')).toBe('#SBATCH --mem=4MB');
+    expect(translateSchedulerDirectives('#BSUB -R rusage[mem=8192]', 'pbs')).toBe('#PBS -l mem=8192MB');
+  });
+
+  it('未知指令、GPU/节点约束和 Donau 不支持的 walltime 均 fail closed', () => {
+    for (const script of ['#BSUB -m node01', '#BSUB -R select[gpu=1]', '#BSUB -x 1']) {
+      expect(() => translateSchedulerDirectives(script, 'slurm')).toThrow('拒绝静默丢弃');
+    }
+    expect(() => translateSchedulerDirectives('#BSUB -W 30', 'donau')).toThrow('拒绝静默丢弃');
+    expect(() => translateSchedulerDirectives('#BSUB -J x', 'unknown')).toThrow('调度器未知');
+  });
+
+  it('PBS C/F 没有 Exit_status 时只报 UNKNOWN', () => {
+    const raw = 'Job ID Name User Time Use S Queue\n123.mgr j u 00:00:00 C batch\n124.mgr j u 00:00:00 F batch';
+    expect(parseJobsOutput('pbs', raw).map(job => job.status)).toEqual(['UNKNOWN', 'UNKNOWN']);
   });
 });

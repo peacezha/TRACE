@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { dataPath } from '../paths';
 
-export type SchedulerKind = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none';
+export type SchedulerKind = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
 
 export const SCHEDULER_LABELS: Record<SchedulerKind, string> = {
   lsf: 'LSF',
@@ -13,6 +13,7 @@ export const SCHEDULER_LABELS: Record<SchedulerKind, string> = {
   pbs: 'PBS',
   donau: 'Donau',
   none: '无调度器',
+  unknown: '调度器未知',
 };
 
 export interface SchedulerTag {
@@ -27,8 +28,9 @@ export interface SchedulerTag {
 }
 
 /** 探测逻辑版本:探测命令/判定规则变化时 +1,旧版本缓存标签自动失效重探。
- *  v2:新增 Donau(dsub/djob)探测——此前被误标 none 的 Donau 集群会自动纠正。 */
-export const SCHEDULER_PROBE_VERSION = 2;
+ *  v2:新增 Donau(dsub/djob)探测。
+ *  v3:unknown 不再缓存为 none，旧版误标全部失效重探。 */
+export const SCHEDULER_PROBE_VERSION = 3;
 
 const TAGS_PATH = () => dataPath('scheduler-tags.json');
 
@@ -38,7 +40,7 @@ export function schedulerTagKey(info: { username: string; host: string; port?: s
 }
 
 export function normalizeSchedulerKind(value: unknown): SchedulerKind | null {
-  return value === 'lsf' || value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' ? value : null;
+  return value === 'lsf' || value === 'slurm' || value === 'pbs' || value === 'donau' || value === 'none' || value === 'unknown' ? value : null;
 }
 
 export async function loadSchedulerTag(key: string): Promise<SchedulerTag | null> {
@@ -91,11 +93,12 @@ export interface EnvProbeResult {
 
 export function parseSchedulerProbe(output: string): EnvProbeResult {
   const text = output.trim().toLowerCase();
-  let kind: SchedulerKind = 'none';
+  let kind: SchedulerKind = 'unknown';
   if (/sched:lsf/.test(text)) kind = 'lsf';
   else if (/sched:slurm/.test(text)) kind = 'slurm';
   else if (/sched:pbs/.test(text)) kind = 'pbs';
   else if (/sched:donau/.test(text)) kind = 'donau';
+  else if (/sched:none/.test(text)) kind = 'none';
   const hasModule = /module:yes/.test(text);
   const installers = [...text.matchAll(/pkg:(mamba|conda|uv|pip3)/g)].map(m => m[1]);
   return { kind, hasModule, installers: [...new Set(installers)] };
@@ -110,12 +113,15 @@ export async function resolveAccountScheduler(
 ): Promise<SchedulerTag> {
   const key = schedulerTagKey(info);
   const cached = await loadSchedulerTag(key);
-  // 探测逻辑升级后旧标签自动失效重探(如 0.5.7 才认识 Donau,旧版标的 none 是错的)
-  if (cached && cached.probeVersion === SCHEDULER_PROBE_VERSION) return cached;
-  let probe: EnvProbeResult = { kind: 'none', hasModule: false, installers: [] };
+  // 只有明确探测结果才缓存；unknown 必须在下次登录重探，不能固化为 none。
+  if (cached && cached.kind !== 'unknown' && cached.probeVersion === SCHEDULER_PROBE_VERSION) return cached;
+  let probe: EnvProbeResult;
   try {
     probe = parseSchedulerProbe(await exec(SCHEDULER_PROBE_COMMAND, 20_000));
-  } catch { /* 探测失败按无调度器处理，不阻塞登录 */ }
+  } catch {
+    probe = { kind: 'unknown', hasModule: false, installers: [] };
+  }
+  if (probe.kind === 'unknown') return { ...probe, detectedAt: Date.now() };
   return saveSchedulerTag(key, probe);
 }
 
@@ -157,6 +163,11 @@ export function buildSchedulerPromptSection(
       section = en
         ? "\n- SCHEDULER: this cluster uses the Donau (多瑙) scheduler. Submit jobs with `dsub -s script.dsub` (the script must be chmod +x first; directives are written as `#DSUB`; `-q <queue>` MUST be paired with `-aa`, otherwise the job never gets scheduled to a compute node; request cores with `-R 'cpu=N'`, NPU/GPU with `-R 'npu=N'`/`-R 'gpu=N'`). Monitor with `djob` / `djob <id>`; check queueing/failure reasons and confirm final states with `djob -l <id>`; cancel with `dkill <id>`; list queues with `dqueue`. A complete hpc-donau guide is available in the skill library — run search_skills before writing job scripts."
         : "\n- 调度器：本集群是多瑙（Donau）调度系统。提交作业用 `dsub -s script.dsub`（脚本必须先 chmod +x；指令写作 `#DSUB`；`-q <队列>` 必须和 `-aa` 一起用，缺了 -aa 作业调度不到计算节点；核数用 `-R 'cpu=N'`，NPU/GPU 用 `-R 'npu=N'`/`-R 'gpu=N'`）。查看作业用 `djob` 或 `djob <id>`，排队/失败原因与终态确认用 `djob -l <id>`，取消作业用 `dkill <id>`，查看队列用 `dqueue`。技能库里有完整的 hpc-donau 使用规范，写作业脚本前先用 search_skills 查询。";
+      break;
+    case 'unknown':
+      section = en
+        ? '\n- SCHEDULER: detection failed or has not completed. Do not submit, cancel, rerun, or infer job states until scheduler detection succeeds.'
+        : '\n- 调度器：探测失败或尚未完成。探测成功前不要提交、取消、重跑作业，也不要推断作业状态。';
       break;
     case 'none':
       section = en

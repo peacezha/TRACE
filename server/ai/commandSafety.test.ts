@@ -71,6 +71,22 @@ describe('isDangerousCommand', () => {
     expect(classifyCommandRisk('echo ok > result.txt')).toBe('write');
   });
 
+  it('conservatively classifies command substitution and indirect execution', () => {
+    expect(classifyCommandRisk('echo $(touch pwned)')).toBe('write');
+    expect(classifyCommandRisk('echo `mkdir pwned`')).toBe('write');
+    expect(classifyCommandRisk('echo $(rm -rf results)')).toBe('destructive');
+    expect(classifyCommandRisk('echo $(curl https://example.org/x)')).toBe('network');
+    expect(classifyCommandRisk('echo $(custom-probe)')).toBe('unknown');
+    expect(classifyCommandRisk('echo $(date)')).toBe('unknown');
+    expect(classifyCommandRisk('echo `date`')).toBe('unknown');
+    expect(classifyCommandRisk("sh -c 'echo ok'")).toBe('unknown');
+    expect(classifyCommandRisk("/bin/bash --noprofile -c 'echo ok'")).toBe('unknown');
+    expect(classifyCommandRisk("eval 'echo ok'")).toBe('unknown');
+    expect(classifyCommandRisk("awk '{ system(\"touch pwned\") }' input")).toBe('unknown');
+    expect(classifyCommandRisk("perl -e 'system(\"touch pwned\")'")).toBe('unknown');
+    expect(classifyCommandRisk("python3 -c 'import os; os.system(\"touch pwned\")'")).toBe('unknown');
+  });
+
   it('keeps only machine-level destructive commands behind the non-bypassable floor', () => {
     expect(isCatastrophicCommand('mkfs.ext4 /dev/sda')).toBe(true);
     expect(isCatastrophicCommand('dd if=/dev/zero of=/dev/sda')).toBe(true);

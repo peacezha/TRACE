@@ -17,6 +17,16 @@ function renderPanel(selectedText: string) {
 }
 
 describe('TerminalAssistPanel', () => {
+  it('作业命令使用当前调度器', () => {
+    const onExecuteCommand = vi.fn();
+    render(<TerminalAssistPanel
+      selectedText="582301" scheduler="slurm"
+      onExecuteCommand={onExecuteCommand} onSendToAI={vi.fn()} onAnalyzeError={vi.fn()} onClose={vi.fn()}
+    />);
+    fireEvent.click(screen.getByRole('button', { name: '查看作业' }));
+    expect(onExecuteCommand).toHaveBeenCalledWith('squeue -j 582301');
+  });
+
   it('路径选区：展示路径摘要与一键命令，点击"进入该目录"执行 cd 并关闭', () => {
     const props = renderPanel('输出位于 /public/home/u/project 目录下');
     expect(screen.getByText('检测到路径')).toBeTruthy();

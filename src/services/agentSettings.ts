@@ -37,7 +37,7 @@ export function normalizeAgentSettings(value: unknown): AgentSettings {
     confirmationPolicy: raw.confirmationPolicy === 'never' || raw.confirmationPolicy === 'state_changes' || raw.confirmationPolicy === 'every_command'
       ? raw.confirmationPolicy
       : 'dangerous',
-    pathPolicy: raw.pathPolicy === 'scoped' ? 'scoped' : 'full_access',
+    pathPolicy: raw.pathPolicy === 'full_access' ? 'full_access' : 'scoped',
     maxCommands: Math.max(MIN_AGENT_COMMANDS, Math.min(MAX_AGENT_COMMANDS, Number(raw.maxCommands) || DEFAULT_AGENT_COMMANDS)),
     maxSteps: Math.max(MIN_AGENT_STEPS, Math.min(MAX_AGENT_STEPS, Number(raw.maxSteps) || DEFAULT_AGENT_STEPS)),
     planReview: raw.planReview === 'always' ? 'always' : 'auto',

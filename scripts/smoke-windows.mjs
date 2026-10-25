@@ -201,12 +201,16 @@ try {
   for (let attempt = 0; attempt < 60; attempt++) {
     if (child.exitCode !== null) throw new Error('Packaged backend exited: ' + log.slice(-3000));
     try {
-      const response = await fetch('http://127.0.0.1:' + port + '/api/app-info');
+      const response = await fetch('http://127.0.0.1:' + port + '/api/app-info', {
+        headers: { 'X-TRACE-Desktop-Token': 'isolated-package-smoke-only' },
+      });
       if (response.ok) { assert((await response.json()).capabilities.cluster); ready = true; break; }
     } catch {}
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   assert(ready, 'Packaged backend did not start: ' + log.slice(-3000));
+  const unauthenticated = await fetch('http://127.0.0.1:' + port + '/api/app-info');
+  assert.equal(unauthenticated.status, 403, 'Desktop API must reject requests without a desktop token');
   const html = await fetch('http://127.0.0.1:' + port + '/');
   assert.equal(html.status, 200);
   assert((await html.text()).includes('/assets/index-'));

@@ -58,6 +58,10 @@ transfers.json
 smoke-*.png
 .skill-index.json
 
+# Python 缓存
+__pycache__/
+*.py[cod]
+
 # 构建/运行产物（不入库）
 output/
 /server.cjs

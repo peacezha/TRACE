@@ -266,4 +266,20 @@ describe('TransferQueue', () => {
 
     expect(screen.getByText('无传输任务')).toBeTruthy();
   });
+
+  it('显示任务错误详情', () => {
+    renderQueue([createTask('failed', { state: 'failed', error: 'disk quota exceeded' })]);
+    expect(screen.getByRole('alert')).toHaveTextContent('disk quota exceeded');
+  });
+
+  it.each([
+    { tasks: [], summary: defaultSummary(), expected: '暂无传输任务' },
+    { tasks: [createTask('failed', { state: 'failed' })], summary: { active: 0, failed: 1, progress: 0.2 }, expected: '1 个失败' },
+    { tasks: [createTask('paused', { state: 'paused' })], summary: defaultSummary(), expected: '传输已暂停' },
+    { tasks: [createTask('done', { state: 'completed' })], summary: defaultSummary(), expected: '传输完成' },
+  ])('折叠摘要区分空/失败/暂停/完成：$expected', ({ tasks, summary, expected }) => {
+    renderQueue(tasks, summary);
+    fireEvent.click(screen.getByTestId('queue-toggle'));
+    expect(screen.getByTestId('queue-collapsed')).toHaveTextContent(expected);
+  });
 });

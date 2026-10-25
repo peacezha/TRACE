@@ -123,12 +123,16 @@ export async function hydrateAIProfile(): Promise<void> {
     const legacy = loadFromLocalStorage();
     if (legacy.apiKey) {
       await desktop.set(DESKTOP_SECRET_KEY, JSON.stringify(legacy));
-      profileCache = legacy;
       clearPlaintextStorage();
     }
+    profileCache = legacy;
   } catch (err) {
-    // 水合失败（如加密不可用）：保持 localStorage 现状，功能不中断
-    console.warn('[aiProfile] 加密存储水合失败，回退 localStorage:', err);
+    // 生产桌面端不得因 safeStorage 故障回退到 localStorage 明文。
+    profileCache = normalizeAIProfile();
+    console.warn('[aiProfile] 加密存储水合失败，仅使用内存配置:', err);
+    window.dispatchEvent(new CustomEvent('trace-persistence-error', {
+      detail: '桌面加密存储不可用，AI 密钥仅保留在当前内存中，不会写入明文存储。',
+    }));
   }
 }
 
@@ -136,7 +140,7 @@ export function loadAIProfile(sessionId = getPublicCluster()): AIProfile {
   if (isPublicWeb()) return sessionId ? publicProfiles.get(sessionId) || normalizeAIProfile() : normalizeAIProfile();
   if (profileCache) return profileCache;
   // legacy key 派生的结果同样缓存——未命中时连读 4 次正是要消除的开销
-  profileCache = isPublicWeb() ? normalizeAIProfile() : loadFromLocalStorage();
+  profileCache = desktopSecrets() ? normalizeAIProfile() : loadFromLocalStorage();
   return profileCache;
 }
 
@@ -150,12 +154,14 @@ export function saveAIProfile(profile: AIProfileInput, sessionId = getPublicClus
   const desktop = desktopSecrets();
   if (desktop) {
     // 桌面端：密文写 safeStorage 存储（同步 API 下 IPC 为异步 fire-and-forget），
-    // 成功后清掉历史明文；写失败（如加密不可用）回退 localStorage，避免配置丢失
+    // 成功后清掉历史明文；失败时保留内存值并提示，绝不写入 localStorage 明文。
     desktop.set(DESKTOP_SECRET_KEY, JSON.stringify(normalized))
       .then(() => clearPlaintextStorage())
       .catch(err => {
-        console.warn('[aiProfile] 加密存储写入失败，回退 localStorage:', err);
-        writeToLocalStorage(normalized);
+        console.warn('[aiProfile] 加密存储写入失败，仅保留内存配置:', err);
+        window.dispatchEvent(new CustomEvent('trace-persistence-error', {
+          detail: 'AI 密钥保存到桌面加密存储失败，当前仅在内存中生效，重启后需重新配置。',
+        }));
       });
   } else if (!isPublicWeb()) {
     writeToLocalStorage(normalized);

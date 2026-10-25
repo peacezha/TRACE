@@ -177,6 +177,33 @@ describe('JobWatcher.poll excerpt 与首轮绑定例外', () => {
     await first;
   });
 
+  it('PBS C/F 仍在列表时也补查 Exit_status，无法核实则保留 UNKNOWN 下轮重试', async () => {
+    let firstExit = '';
+    const h = makePollHarness({ exec: cmd => {
+      if (cmd.includes('qstat -u')) return [
+        'Job ID Name User Time Use S Queue',
+        '501.mgr first u 00:00:00 C batch',
+        '502.mgr second u 00:00:00 F batch',
+      ].join('\n');
+      if (cmd.includes('qstat -x -f 501')) return `job_state = C${firstExit}`;
+      if (cmd.includes('qstat -x -f 502')) return 'job_state = F Exit_status = 3';
+      return '';
+    } });
+    h.session.scheduler = 'pbs';
+    h.watcher.trackJobs('sess-1', ['501', '502']);
+    await h.poll();
+    expect(h.events()).toEqual([expect.objectContaining({ jobId: '502', status: 'EXIT' })]);
+    expect((h.watcher as any).prevJobs.get('sess-1')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: '501', status: 'UNKNOWN' }),
+    ]));
+    firstExit = ' Exit_status = 0';
+    await h.poll();
+    expect(h.events()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: '501', status: 'DONE' }),
+    ]));
+    expect(h.exec.mock.calls.some(([cmd]) => String(cmd).includes('qstat -x -f 501'))).toBe(true);
+  });
+
   it('终态事件带 bpeek 输出尾部摘要，并持久化到 job-events.json', async () => {
     const h = makePollHarness({
       exec: cmd => {

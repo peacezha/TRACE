@@ -88,7 +88,7 @@ beforeEach(() => {
 describe('agent runtime limits', () => {
   it('uses the longer default and accepts the configurable upper limits', () => {
     expect(normalizeAgentRuntimeConfig({})).toMatchObject({
-      confirmationPolicy: 'dangerous', pathPolicy: 'full_access', maxCommands: 40, maxSteps: 200,
+      confirmationPolicy: 'dangerous', pathPolicy: 'scoped', maxCommands: 40, maxSteps: 200,
     });
     expect(normalizeAgentRuntimeConfig({ maxCommands: 200, maxSteps: 500 }))
       .toMatchObject({ maxCommands: 200, maxSteps: 500 });
@@ -161,10 +161,14 @@ describe('lightweight workflow execution mode', () => {
     policy: 'isolated-run-v1' as const,
   };
 
-  it('uses DeepSeek flash instead of a reasoning model for saved workflow steps', () => {
+  it('respects the user-selected reasoning model and sampling profile for saved workflow steps', () => {
+    const reasoning = {
+      provider: 'deepseek', model: 'deepseek-reasoner', apiKey: 'x', temperature: 0.65,
+    };
+    expect(workflowExecutionProfile(reasoning)).toEqual(reasoning);
     expect(workflowExecutionProfile({
-      provider: 'deepseek', model: 'deepseek-reasoner', apiKey: 'x',
-    }).model).toBe('deepseek-flash');
+      provider: 'deepseek', model: 'deepseek-v4-pro', apiKey: 'x', temperature: 0.4,
+    })).toMatchObject({ model: 'deepseek-v4-pro', temperature: 0.4 });
     expect(workflowExecutionProfile({
       provider: 'openai', model: 'gpt-4o', apiKey: 'x',
     }).model).toBe('gpt-4o');
@@ -188,7 +192,8 @@ describe('lightweight workflow execution mode', () => {
     expect(prompt).toContain('step-02.sh');
     expect(prompt).toContain('restartFromStep');
     expect(prompt).toContain('Do not hand shell commands back to the user');
-    expect(prompt.length).toBeLessThan(6_000);
+    // 提交未知状态和调度器安全提示增加后仍保持紧凑单步提示。
+    expect(prompt.length).toBeLessThan(6_500);
   });
 
   it('adds an environment-repair mode section only when the run starts blocked_env', () => {
@@ -942,12 +947,96 @@ describe('runAgent ask_user handling', () => {
     expect(submitted).toEqual([['75598506']]);
     expect(dones[0]).toContain('没有重复提交');
   });
+
+  it.each([
+    { name: 'missing receipt', result: 'accepted without an id', rejected: false },
+    { name: 'SSH timeout', error: 'SSH connection timed out', rejected: false },
+    { name: 'definite rejection', error: 'Command exited with code 1: invalid queue', rejected: true },
+  ])('classifies native submission $name without enabling a blind retry', async ({ result, error, rejected }) => {
+    mockStreamText.mockImplementation((options: any) => ({
+      fullStream: (async function* () {
+        await options.tools.set_plan.execute({
+          goal: '提交作业', steps: [{ title: '提交', verification: '拿到作业号' }],
+        });
+        await options.tools.update_plan_step.execute({ id: '1', status: 'running' });
+        await options.tools.run_command.execute({ command: 'bsub -q normal "sleep 300"' });
+        await options.tools.update_plan_step.execute({ id: '1', status: 'done', summary: '命令结果已分类' });
+        yield { type: 'text-delta', text: 'finished' };
+      })(),
+    }));
+    const run = error
+      ? vi.fn().mockRejectedValue(new Error(error))
+      : vi.fn().mockResolvedValue(result);
+    const guard = {
+      prepare: vi.fn(async () => ({ kind: 'execute', claim: { key: 'k', claimId: 'c' } })),
+      complete: vi.fn(), markUnknown: vi.fn(), fail: vi.fn(),
+    } as any;
+    const toolResults: string[] = [];
+    await runAgent(
+      {
+        sid: 'session-1', run,
+        profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test-key' },
+        jobSubmissionGuard: guard,
+      },
+      {
+        onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onStep: vi.fn(), onAsk: vi.fn(), onErr: vi.fn(),
+        onToolResult: (_name, value) => toolResults.push(value), onDone: vi.fn(), sig: () => undefined,
+      },
+      [{ role: 'user', content: '提交作业' }],
+    );
+    expect(guard.fail).toHaveBeenCalledTimes(rejected ? 1 : 0);
+    expect(guard.markUnknown).toHaveBeenCalledTimes(rejected ? 0 : 1);
+    expect(toolResults.join('\n')).toContain(rejected ? '尚未提交作业' : '不能盲目重试');
+    expect(toolResults.join('\n')).not.toContain('可换个更小的命令重试');
+  });
+
+  it('allows an unknown submission retry only after explicit user confirmation', async () => {
+    mockStreamText.mockImplementation((options: any) => ({
+      fullStream: (async function* () {
+        await options.tools.set_plan.execute({
+          goal: '重试作业', steps: [{ title: '重新提交', verification: '核实作业号' }],
+        });
+        await options.tools.update_plan_step.execute({ id: '1', status: 'running' });
+        await options.tools.run_command.execute({ command: 'bsub < code/step-03.sh' });
+        yield { type: 'text-delta', text: '已重新提交并核实。' };
+      })(),
+    }));
+    const record = { key: 'k', state: 'unknown', updatedAt: 1, jobIds: [] };
+    const claim = { key: 'k', claimId: 'new-claim' };
+    const guard = {
+      prepare: vi.fn(async () => ({ kind: 'unknown', record })),
+      retryUnknown: vi.fn(() => claim), complete: vi.fn(), markUnknown: vi.fn(), fail: vi.fn(),
+    } as any;
+    const confirmCommand = vi.fn(async () => true);
+    const run = vi.fn().mockResolvedValue('Job <12345> is submitted to queue <normal>.');
+    await runAgent(
+      {
+        sid: 'session-1', run, confirmCommand,
+        profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test-key' },
+        jobSubmissionGuard: guard,
+      },
+      {
+        onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onStep: vi.fn(), onAsk: vi.fn(), onErr: vi.fn(),
+        onToolResult: vi.fn(), onDone: vi.fn(), sig: () => undefined,
+      },
+      [{ role: 'user', content: '已核实未提交，允许重试' }],
+    );
+    expect(confirmCommand).toHaveBeenCalledOnce();
+    expect(guard.retryUnknown).toHaveBeenCalledWith(record);
+    expect(guard.complete).toHaveBeenCalledWith(claim, ['12345']);
+    // 一次提交前检查 + 一次真实提交，不允许额外盲目重试。
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls.at(-1)?.[1]).toBe('bsub < code/step-03.sh');
+  });
 });
 
 describe('formal workflow command budget', () => {
   const runDir = '/public/home/u/trace_flows/rna/03_workspace/runs/run-budget';
 
-  function setup(rounds: (round: number, options: any) => AsyncGenerator<unknown, void, unknown>) {
+  function setup(
+    rounds: (round: number, options: any) => AsyncGenerator<unknown, void, unknown>,
+    profile = { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test-key' },
+  ) {
     let authoritativeRun: any = {
       runId: 'run-budget', workflowId: 'wf-rna', workflowName: 'RNA', workflowVersion: 1,
       runDir, workspacePolicy: 'isolated-run-v1', status: 'running', startedAt: 1,
@@ -976,7 +1065,7 @@ describe('formal workflow command budget', () => {
       {
         sid: 'session-1', home: '/public/home/u', run: clusterRun,
         workflowRun: { workflowId: 'wf-rna', runId: 'run-budget', runDir, policy: 'isolated-run-v1' },
-        profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test-key' },
+        profile,
       },
       {
         onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(),
@@ -992,6 +1081,14 @@ describe('formal workflow command budget', () => {
       .filter((command: string) => command.startsWith(`cd '${runDir}'`));
     return { clusterRun, toolResults, dones, errors, start, workflowCommands, getRun: () => authoritativeRun };
   }
+
+  it('passes the user execution profile temperature to streamText in a formal workflow', async () => {
+    const env = setup(async function* () {
+      yield { type: 'text-delta', text: 'done' };
+    }, { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test-key', temperature: 0.73 });
+    await env.start();
+    expect(mockStreamText.mock.calls[0][0].temperature).toBe(0.73);
+  });
 
   it('blocks new submissions in the same model round after failed QC, while allowing read-only diagnostics', async () => {
     const env = setup(async function* (_round, options) {

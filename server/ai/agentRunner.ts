@@ -8,7 +8,7 @@ import { loadOrRefreshSkillIndex, searchSkillIndex } from './skillIndex';
 import { getCachedClusterSkills } from './clusterSkills';
 import { NCPGR_RULES_EN } from '../../shared/ncpgrRules';
 import { installSkillFromSource } from './skillInstaller';
-import { isSubmissionCommand } from '../dsh/jobAgentBindings';
+import { extractSubmittedJobIds, isSubmissionCommand } from '../dsh/jobAgentBindings';
 import { loadWorkflows } from '../workflows/workflowStore';
 import { readWorkflowRun, updateWorkflowRun } from '../workflows/workflowRunService';
 import { classifyCommandRisk, isCatastrophicCommand, isJobTerminationCommand, type CommandRisk } from './commandSafety';
@@ -27,7 +27,13 @@ import { AgentStreamTimeoutError, consumeAgentStream } from './agentStreamLifecy
 import { scopeWorkflowCommand } from './workflowCommandScope';
 import { buildSchedulerPromptSection } from '../cluster/schedulerProfile';
 import { finalStateCommand } from '../notifications/scheduler';
-import { preflightJobSubmission, type JobSubmissionClaim, type JobSubmissionGuard } from './jobSubmissionGuard';
+import {
+  isDefiniteSubmissionRejection,
+  preflightJobSubmission,
+  SUBMISSION_UNKNOWN_GUIDANCE,
+  type JobSubmissionClaim,
+  type JobSubmissionGuard,
+} from './jobSubmissionGuard';
 import { stripDsmlMarkup } from '../../shared/dsml';
 import type { WorkflowExecutionContext } from '../../shared/workflowExecution';
 import type { WorkflowRunPatch } from '../../shared/workflowRun';
@@ -289,7 +295,7 @@ export function normalizeAgentRuntimeConfig(value: unknown): AgentRuntimeConfig 
   const confirmationPolicy = raw.confirmationPolicy === 'never' || raw.confirmationPolicy === 'state_changes' || raw.confirmationPolicy === 'every_command'
     ? raw.confirmationPolicy
     : 'dangerous';
-  const pathPolicy = raw.pathPolicy === 'scoped' ? 'scoped' : 'full_access';
+  const pathPolicy = raw.pathPolicy === 'full_access' ? 'full_access' : 'scoped';
   const maxCommands = Math.max(MIN_AGENT_COMMANDS, Math.min(MAX_AGENT_COMMANDS, Number(raw.maxCommands) || DEFAULT_AGENT_COMMANDS));
   const maxSteps = Math.max(MIN_AGENT_STEPS, Math.min(MAX_AGENT_STEPS, Number(raw.maxSteps) || DEFAULT_AGENT_STEPS));
   const planReview = raw.planReview === 'always' ? 'always' : 'auto';
@@ -550,11 +556,8 @@ export function buildLocalWorkspacePromptSection(
 - 任务分级：简单查询（看文件、查数据库记录）直接回答，不要 set_plan、不要写校验脚本、不要多来源交叉验证。`;
 }
 
-/** 成品流程优先使用低延迟执行模型；普通对话仍完全尊重用户所选模型。 */
+/** 正式流程与普通对话都尊重用户选择的模型和采样参数。 */
 export function workflowExecutionProfile(profile: AIProfile): AIProfile {
-  if (profile.provider === 'deepseek' && /^(deepseek-reasoner|deepseek-v4-pro)$/i.test(profile.model || '')) {
-    return { ...profile, model: 'deepseek-flash', temperature: 0 };
-  }
   return profile;
 }
 
@@ -1385,6 +1388,21 @@ export async function runAgent(
                 stopForGuard(msg);
                 return msg;
               }
+              if (decision.kind === 'unknown') {
+                const approved = ctx.confirmCommand
+                  ? await withHumanWait(ctx.confirmCommand(executionCommand, {
+                    risk: 'destructive',
+                    title: '提交结果未知：仅在已核实未提交后允许重试',
+                  }))
+                  : false;
+                if (!approved) {
+                  const msg = `[SUBMISSION_UNKNOWN] ${SUBMISSION_UNKNOWN_GUIDANCE}`;
+                  cb.onToolResult('run_command', msg);
+                  stopForGuard(msg);
+                  return msg;
+                }
+                submissionClaim = ctx.jobSubmissionGuard.retryUnknown(decision.record);
+              }
               if (decision.kind === 'reuse') {
                 return handoffSubmittedJobs(
                   decision.record.jobIds,
@@ -1393,7 +1411,7 @@ export async function runAgent(
                   true,
                 );
               }
-              submissionClaim = decision.claim;
+              if (decision.kind === 'execute') submissionClaim = decision.claim;
             }
 
             try {
@@ -1409,13 +1427,11 @@ export async function runAgent(
               const activeStep = planState.activeStep();
               if (plan && activeStep) cb.onPlanUpdate?.(plan, activeStep.id);
 
-              // 只有命令本身是提交命令（bsub/sbatch/qsub）时，输出里的回执才算新提交；
+              // 只有命令本身是提交命令（bsub/sbatch/qsub/dsub -s）时，输出里的回执才算新提交；
               // cat 历史 submit 日志/bjobs 查询输出同样含 "Job <id>"，不能触发监控交接
               //（v0.4.31 根因：旧回执误判导致假死与假信息）。
-              const submittedJobIds = !isSubmissionCommand(command) ? [] : [
-                ...[...output.matchAll(/Job\s+<(\d+(?:[._]\d+)?)>\s+is\s+submitted\b/gi)].map(match => match[1]),
-                ...[...output.matchAll(/Submitted\s+batch\s+job\s+(\d+(?:[._]\d+)?)/gi)].map(match => match[1]),
-              ];
+              const submission = isSubmissionCommand(command);
+              const submittedJobIds = submission ? extractSubmittedJobIds(output) : [];
               if (submittedJobIds.length > 0) {
                 if (submissionClaim) {
                   try {
@@ -1428,32 +1444,49 @@ export async function runAgent(
                 }
                 return handoffSubmittedJobs(submittedJobIds, truncated);
               }
-              if (submissionClaim) {
-                try { ctx.jobSubmissionGuard?.fail(submissionClaim); } catch { /* 保留原始工具结果 */ }
+              if (submission && submissionClaim) {
+                try { ctx.jobSubmissionGuard?.markUnknown(submissionClaim); } catch { /* 保留原始工具结果 */ }
               }
-              const commandResult = truncated;
+              const commandResult = submission
+                ? `${truncated}\n[SUBMISSION_UNKNOWN] ${SUBMISSION_UNKNOWN_GUIDANCE}`
+                : truncated;
               if (formalWorkflow) {
                 workflowCommandEvidence.push(`[输出] ${trunc(commandResult, 2400)}`);
               }
               cb.onToolResult('run_command', commandResult);
+              if (submission) stopForGuard(commandResult);
               return commandResult;
             } catch (err: any) {
+              const submission = isSubmissionCommand(command);
+              const rejected = submission && isDefiniteSubmissionRejection(err);
               if (submissionClaim) {
-                try { ctx.jobSubmissionGuard?.fail(submissionClaim); } catch { /* 保留原始命令错误 */ }
+                try {
+                  if (rejected) ctx.jobSubmissionGuard?.fail(submissionClaim);
+                  else ctx.jobSubmissionGuard?.markUnknown(submissionClaim);
+                } catch { /* 保留原始命令错误 */ }
               }
               consecutiveCommandFailures += 1;
               const errText = err?.message || String(err);
               // 区分错误类型并给出策略提示，避免 AI 盲目重试
               const isExitCode = /exited with code|exit code/i.test(errText);
               const isTransient = /timed? ?out|socket|reset|refused|unreach|transport/i.test(errText);
-              const hint = isExitCode
-                ? '\n提示：这是命令本身的报错（多为路径不存在/权限不足）。不要原样重试——先用 ls -ld <目录>、stat <文件> 或 namei -l <路径> 诊断原因，再决定下一步。'
-                : isTransient
-                ? '\n提示：疑似网络/通道瞬时问题，可换个更小的命令重试一次；若仍失败请检查 SSH 会话。'
-                : '';
+              const hint = rejected
+                ? '\n提示：调度器已明确拒绝本次命令，尚未提交作业。请修正命令或脚本后再提交，不要原样重试。'
+                : submission
+                  ? `\n[SUBMISSION_UNKNOWN] ${SUBMISSION_UNKNOWN_GUIDANCE}`
+                  : isExitCode
+                    ? '\n提示：这是命令本身的报错（多为路径不存在/权限不足）。不要原样重试——先用 ls -ld <目录>、stat <文件> 或 namei -l <路径> 诊断原因，再决定下一步。'
+                    : isTransient
+                      ? '\n提示：疑似网络/通道瞬时问题，可换个更小的命令重试一次；若仍失败请检查 SSH 会话。'
+                      : '';
               const msg = `Command failed: ${errText}${hint}`;
               if (formalWorkflow) {
                 workflowCommandEvidence.push(`[失败] ${trunc(msg, 2400)}`);
+              }
+              if (submission && !rejected) {
+                cb.onToolResult('run_command', msg);
+                stopForGuard(msg);
+                return msg;
               }
               if (consecutiveCommandFailures >= MAX_CONSECUTIVE_COMMAND_FAILURES) {
                 const stopMsg = `${msg}\n\n连续 ${MAX_CONSECUTIVE_COMMAND_FAILURES} 次命令失败，已暂停以防空转（这不是软件崩溃）。失败原因见上方输出：多数是路径不存在或权限不足。请人工确认路径/权限后，换个说法让我继续。`;
@@ -2129,6 +2162,7 @@ export async function runAgent(
                 ctx.home,
                 input.runDir,
                 patch,
+                { scheduler: ctx.scheduler },
               );
               activeWorkflowRun = run;
               if (questionGuard.observeRun(run)) blockedQuestions = 0;
@@ -2391,7 +2425,7 @@ export async function runAgent(
         messages: workingConversationMsgs,
         // 插话注入需要在消息序列里附加 system 注记（prepareStep 返回的 messages）。
         ...(ctx.steer ? { allowSystemInMessages: true } : {}),
-        ...(/reasoner|v4-pro/i.test(ctx.profile.model || '') ? {} : { temperature: ctx.profile.temperature ?? 0.1 }),
+        ...(/reasoner|v4-pro/i.test(executionProfile.model || '') ? {} : { temperature: executionProfile.temperature ?? 0.1 }),
         maxOutputTokens: workflowExecutor ? 4096 : workflowInspection ? 2048 : 4096,
         abortSignal: askAbort.signal,
         stopWhen: stepCountIs(remainingModelSteps),

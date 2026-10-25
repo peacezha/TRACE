@@ -41,10 +41,10 @@ for (const name of names) {
 const heading = '## 公共网页 Node.js 20 兼容更新';
 if (!release.body?.includes(heading)) {
   const body = (release.body || '') + '\n\n' + heading + '\n\n'
-    + '- 新包：' + archiveName + '。最低 Node.js 20.19.5，仍支持 Node.js 22；本包包含当前版本的文献学习修复。\n'
+    + '- 新包：' + archiveName + '。最低 Node.js 20.19.5，仍支持 Node.js 22；包含 v0.5.14 的桌面认证、提交防重、调度器、传输与敏感配置修复。\n'
     + '- 解压后运行 `npm ci --omit=dev --ignore-scripts`，再 `npm start -- --url https://你的域名`。公网须配置 HTTPS 反向代理。\n'
     + '- [公共网页部署说明](https://github.com/peacezha/TRACE/blob/main/docs/PUBLIC_WEB_DEPLOYMENT.md)。旧 web-linux-x64 包是单用户版，不能移除口令后直接公开。\n'
-    + '- 保留经典 v0.4.41 界面、多用户隔离与集群数据存储；历史安装包和网页资产不覆盖。本版本另附 Windows/Mac 安装包。Node.js 20 已结束官方维护，长期公网部署建议使用受支持的 LTS。\n';
+    + '- 公共网页按访客隔离工作进程，私人对话和配置保存在用户自己的集群；不开放部署服务器本地命令。Node.js 20 已结束官方维护，长期公网部署建议使用受支持的 LTS。\n';
   const updated = await fetch(base + '/' + release.id, { method: 'PATCH', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ body, tag_name: 'v' + version, target_commitish: release.target_commitish }) });
   if (!updated.ok) throw new Error('Release notes update failed: ' + updated.status);
 }

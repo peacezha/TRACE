@@ -95,6 +95,39 @@ describe('桌面端加密存储：水合与迁移', () => {
     expect(totpStorage.getStoredSecret()).toBe('BBB');
   });
 
+  it('桌面加密写入失败：仅保留内存值并提示，不回退 localStorage 明文', async () => {
+    localStorage.setItem('ai_api_key', 'sk-old');
+    localStorage.setItem('trace_totp_secret', 'OLDSECRET');
+    localStorage.setItem('trace_saved_password', 'old-pw');
+    const secrets = {
+      get: vi.fn(async () => { throw new Error('safeStorage unavailable'); }),
+      set: vi.fn(async () => { throw new Error('safeStorage unavailable'); }),
+      delete: vi.fn(async () => { throw new Error('safeStorage unavailable'); }),
+    };
+    (window as any).traceDesktop = { secrets };
+    const persistenceError = vi.fn();
+    window.addEventListener('trace-persistence-error', persistenceError);
+    const { aiProfile, totpStorage } = await loadModules();
+
+    await aiProfile.hydrateAIProfile();
+    await totpStorage.hydrateTotpStorage();
+    expect(aiProfile.loadAIProfile().apiKey).toBe('');
+    expect(totpStorage.getStoredSecret()).toBe('');
+    expect(totpStorage.getSavedPassword()).toBe('');
+
+    aiProfile.saveAIProfile({ provider: 'openai', model: 'gpt-4o', apiKey: 'sk-memory' });
+    totpStorage.storeSecret('MEMORYSECRET');
+    totpStorage.savePassword('memory-pw');
+    await vi.waitFor(() => expect(persistenceError).toHaveBeenCalled());
+    expect(aiProfile.loadAIProfile().apiKey).toBe('sk-memory');
+    expect(totpStorage.getStoredSecret()).toBe('MEMORYSECRET');
+    expect(totpStorage.getSavedPassword()).toBe('memory-pw');
+    expect(localStorage.getItem('ai_api_key')).toBe('sk-old');
+    expect(localStorage.getItem('trace_totp_secret')).toBe('OLDSECRET');
+    expect(localStorage.getItem('trace_saved_password')).toBe('old-pw');
+    window.removeEventListener('trace-persistence-error', persistenceError);
+  });
+
   it('浏览器开发模式：无桌面通道时维持 localStorage 现状行为', async () => {
     const { aiProfile, totpStorage } = await loadModules();
 

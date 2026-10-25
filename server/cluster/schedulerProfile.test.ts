@@ -29,7 +29,7 @@ describe('schedulerProfile（账号级调度器标签）', () => {
     expect(parseSchedulerProbe('SCHED:LSF\nSCHED:DONAU').kind).toBe('lsf');
     expect(parseSchedulerProbe('SCHED:PBS\nSCHED:DONAU').kind).toBe('pbs');
     expect(parseSchedulerProbe('SCHED:NONE\nMODULE:NO\nPKG:pip3')).toEqual({ kind: 'none', hasModule: false, installers: ['pip3'] });
-    expect(parseSchedulerProbe('').kind).toBe('none');
+    expect(parseSchedulerProbe('').kind).toBe('unknown');
   });
 
   it('caches the detected tag per account and never re-probes', async () => {
@@ -48,11 +48,11 @@ describe('schedulerProfile（账号级调度器标签）', () => {
   it('re-probes once when the cached tag predates the current probe version', async () => {
     const mod = await freshModule();
     const info = { username: 'che24', host: 'hpc2.example.edu', port: 18082 };
-    // 先正常存一个标签,再把 probeVersion 抹掉,模拟旧版本留下的历史标签
+    // 模拟 v0.5.13（probe v2）误缓存的 none：升级后必须重探，不能直接信任。
     await mod.saveSchedulerTag(mod.schedulerTagKey(info), { kind: 'none' });
     const tagFile = path.join(state.tmpRoot, 'scheduler-tags.json');
     const all = JSON.parse(await fs.readFile(tagFile, 'utf8'));
-    delete all[mod.schedulerTagKey(info)].probeVersion;
+    all[mod.schedulerTagKey(info)].probeVersion = 2;
     await fs.writeFile(tagFile, JSON.stringify(all));
     let probes = 0;
     const exec = async () => { probes += 1; return 'SCHED:DONAU\nMODULE:YES'; };
@@ -76,10 +76,21 @@ describe('schedulerProfile（账号级调度器标签）', () => {
       .not.toBe(schedulerTagKey({ username: 'bob', host: 'b.edu', port: 22 }));
   });
 
-  it('probe failure falls back to none without blocking login', async () => {
-    const { resolveAccountScheduler } = await freshModule();
-    const tag = await resolveAccountScheduler({ username: 'c', host: 'c.edu', port: 22 }, async () => { throw new Error('ssh down'); });
-    expect(tag.kind).toBe('none');
+  it('probe failure returns uncached unknown and retries on next resolve', async () => {
+    const { resolveAccountScheduler, loadSchedulerTag, schedulerTagKey } = await freshModule();
+    const info = { username: 'c', host: 'c.edu', port: 22 };
+    let probes = 0;
+    const exec = async () => {
+      probes += 1;
+      if (probes === 1) throw new Error('ssh down');
+      return 'SCHED:PBS\nMODULE:YES';
+    };
+    const failed = await resolveAccountScheduler(info, exec);
+    expect(failed.kind).toBe('unknown');
+    expect(await loadSchedulerTag(schedulerTagKey(info))).toBeNull();
+    expect((await resolveAccountScheduler(info, exec)).kind).toBe('pbs');
+    await resolveAccountScheduler(info, exec);
+    expect(probes).toBe(2);
   });
 
   it('manual redetect clears the tag so next resolve probes again', async () => {
@@ -124,7 +135,7 @@ describe('scheduler command maps（LSF/Slurm/PBS/none）', () => {
     expect(slurm).toContain('#SBATCH --job-name=encode_rna');
     expect(slurm).toContain('#SBATCH --ntasks=8');
     expect(slurm).toContain('#SBATCH --partition=normal');
-    expect(slurm).toContain('#SBATCH --time=120');
+    expect(slurm).toContain('#SBATCH --time=02:00');
     expect(slurm).not.toContain('#BSUB');
     const pbs = translateSchedulerDirectives(script, 'pbs');
     expect(pbs).toContain('#PBS -N encode_rna');

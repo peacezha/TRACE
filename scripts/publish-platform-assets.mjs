@@ -24,8 +24,8 @@ else if (response.status === 404) {
   release = drafts[0];
 } else throw new Error('Existing release not found: ' + response.status);
 const files = fs.readdirSync(directory).filter(name => name.startsWith(prefix)
-  && /^(?:mac-(?:arm64|x64)\.(?:dmg|zip)|web-linux-x64\.tar\.gz(?:\.sha256)?|platforms-[\w.-]+\.json)$/.test(name.slice(prefix.length)));
-for (const needed of [prefix + 'mac-arm64.dmg', prefix + 'mac-x64.dmg']) {
+  && /^(?:mac-(?:arm64|x64)\.(?:dmg|zip)|web-linux-x64\.tar\.gz(?:\.sha256)?|public-web-linux-x64-node20\.tar\.gz(?:\.sha256)?|platforms-[\w.-]+\.json)$/.test(name.slice(prefix.length)));
+for (const needed of [prefix + 'mac-arm64.dmg', prefix + 'mac-x64.dmg', prefix + 'public-web-linux-x64-node20.tar.gz']) {
   if (!files.includes(needed)) throw new Error('Incomplete platform build: ' + needed);
 }
 const hashes = new Map();
@@ -62,6 +62,7 @@ if (!release.body?.includes(heading)) {
   const body = (release.body || '') + '\n\n' + heading + '\n\n'
     + '- Apple 芯片：' + prefix + 'mac-arm64.dmg；Intel：' + prefix + 'mac-x64.dmg。未配置 Apple 签名/公证；首次打开须按系统提示确认，当前手动更新。\n'
     + (files.includes(prefix + 'web-linux-x64.tar.gz') ? '- Linux 私有网页部署：' + prefix + 'web-linux-x64.tar.gz，单用户工作台；面向大众请用 public-web 包。\n' : '')
+    + '- Linux 公共网页部署：' + prefix + 'public-web-linux-x64-node20.tar.gz，Node.js 20 部署包。\n'
     + '- [安装与部署说明](https://github.com/peacezha/TRACE/blob/main/docs/MAC_WEB_DEPLOYMENT.md)。公网须使用 HTTPS 或 SSH 隧道。\n'
     + '- Windows 安装包和 latest.yml 保持不变；附平台产物 SHA-256 与构建来源。\n';
   const updated = await fetch(`https://api.github.com/repos/${repository}/releases/${release.id}`, {

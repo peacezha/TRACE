@@ -50,6 +50,12 @@ export interface HostProfileMetadata {
   lastUsedAt?: number;
 }
 
+export interface TransferSourceFingerprint {
+  size: number;
+  /** 本地使用 mtimeMs；SFTP 的秒级 mtime 统一换算为毫秒。 */
+  mtime: number;
+}
+
 export interface TransferTask {
   id: string;
   profileId: string;
@@ -60,6 +66,8 @@ export interface TransferTask {
   localPath: string;
   remotePath: string;
   temporaryPath: string;
+  /** 创建传输时固定的源文件身份；旧版本持久记录可能缺失。 */
+  sourceFingerprint?: TransferSourceFingerprint;
   totalBytes: number;
   transferredBytes: number;
   bytesPerSecond: number;

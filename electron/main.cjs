@@ -169,9 +169,10 @@ function restartAfterRendererCrash(win, detail) {
 // 服务端落盘密钥（ai-profile/notify-config/qqbot 中的 apiKey、smtpPass、appSecret）
 // 的 AES-256-GCM 主密钥：随机 32 字节，用 safeStorage 加密后存
 // userData/server-key.json，派生后端进程时经 TRACE_ENCRYPTION_KEY 注入。
-// safeStorage 不可用时不注入，后端退化为明文透传（与纯 tsx 开发模式行为一致）。
+// safeStorage 不可用时仅使用本次进程内的随机密钥，绝不退化为明文落盘；
+// 重启后旧密文不可读，用户需要重新配置，与前端“仅保留内存”的语义一致。
 function loadServerEncryptionKey() {
-  if (!safeStorage.isEncryptionAvailable()) return '';
+  if (!safeStorage.isEncryptionAvailable()) return crypto.randomBytes(32).toString('hex');
   const keyFile = path.join(app.getPath('userData'), 'server-key.json');
   try {
     const saved = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
@@ -295,7 +296,7 @@ function closeSplash() {
   splashWindow = null;
 }
 
-function createWindow(url) {
+function createWindow(url, desktopToken) {
   const win = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -352,6 +353,16 @@ function createWindow(url) {
     if (level >= 2 && currentLogFile) {
       appendLog(currentLogFile, `[renderer:${level}] ${String(message).slice(0, 500)}\n`);
     }
+  });
+  // The token stays in the main process and is only attached to this exact loopback origin.
+  const trustedOrigin = new URL(url).origin;
+  win.webContents.session.webRequest.onBeforeSendHeaders({ urls: [`${trustedOrigin}/*`] }, (details, callback) => {
+    let requestOrigin = '';
+    try { requestOrigin = new URL(details.url).origin; } catch { /* Never inject into malformed URLs. */ }
+    if (requestOrigin === trustedOrigin) {
+      details.requestHeaders['X-TRACE-Desktop-Token'] = desktopToken;
+    }
+    callback({ requestHeaders: details.requestHeaders });
   });
   win.loadURL(url);
   win.webContents.on('render-process-gone', (_event, details) => {
@@ -842,7 +853,7 @@ async function boot() {
     updateSplash(85, '后台已就绪，正在加载界面…');
 
     // Activity-aware window close
-    mainWindow = createWindow(url);
+    mainWindow = createWindow(url, desktopToken);
     mainWindow.on('close', createWindowCloseGuard({
       confirmClose: () => promptBeforeClose(port, desktopToken),
       getWindow: () => mainWindow,

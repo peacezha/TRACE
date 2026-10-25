@@ -70,7 +70,8 @@ interface ClusterTab {
   sessionId: string;
   connInfo: { host: string; port: string; username: string };
   home: string;
-  /** 登录时探测并打标签的调度器（LSF/Slurm/PBS/无调度器），用于界面展示 */
+  /** 登录时探测的调度器与展示标签（LSF/Slurm/PBS/无调度器）。 */
+  scheduler?: string;
   schedulerLabel?: string;
   messages: Message[];
   activeConversationId: string | null;
@@ -158,6 +159,7 @@ export default function App() {
     if (tab === 'conversations') setWorkspaceView('chat');
     else if (tab === 'compute') setWorkspaceView('cluster');
     else if (tab === 'webapis') setWorkspaceView('webapis');
+    else if (tab === 'files') setFileTransferOpen(true);
   }, []);
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
   useEffect(() => {
@@ -275,6 +277,8 @@ export default function App() {
   const autoSaveConversationIdsRef = useRef<Map<string, string | null>>(new Map());
   const autoSaveSeenMessagesRef = useRef<Map<string, Message[]>>(new Map());
   const autoSaveEpochRef = useRef<Map<string, number>>(new Map());
+  const [autoSaveFailure, setAutoSaveFailure] = useState<{ storageKey: string; message: string } | null>(null);
+  const [transferIndicators, setTransferIndicators] = useState({ active: 0, failed: 0 });
 
   // External AI trigger —increments when toolbar sends text to AI
   // 按标签作用域：tabId 标识属于哪个集群的触发，切换标签不会误触发其他标签的 AI
@@ -387,6 +391,31 @@ export default function App() {
     }
   }, [updateConversationTab]);
 
+  const saveConversationSnapshot = useCallback(async (tab: ClusterTab) => {
+    const storageKey = conversationStorageKey(tab);
+    const knownId = autoSaveConversationIdsRef.current.has(storageKey)
+      ? autoSaveConversationIdsRef.current.get(storageKey) ?? null
+      : tab.activeConversationId;
+    const savedId = await saveConversation(tab.messages, knownId, tab.sessionId, tab.conversationContextId);
+    autoSaveConversationIdsRef.current.set(storageKey, savedId);
+    setAutoSaveFailure(current => current?.storageKey === storageKey ? null : current);
+    return savedId;
+  }, [saveConversation]);
+
+  const retryAutoSave = useCallback(async () => {
+    if (!autoSaveFailure) return;
+    const tab = tabsRef.current.find(item => conversationStorageKey(item) === autoSaveFailure.storageKey);
+    if (!tab) return;
+    try {
+      await saveConversationSnapshot(tab);
+    } catch (error) {
+      setAutoSaveFailure({
+        storageKey: autoSaveFailure.storageKey,
+        message: error instanceof Error ? error.message : '网络错误',
+      });
+    }
+  }, [autoSaveFailure, saveConversationSnapshot]);
+
   // 对话与隐藏的 Agent 计划检查点自动保存到集群。按标签串行写入，避免首次
   // 创建对话时多个并发请求各自生成不同 ID；连续工具事件合并为一次写入。
   useEffect(() => {
@@ -421,23 +450,20 @@ export default function App() {
               item.sessionId === tab.sessionId && item.conversationContextId === tab.conversationContextId
             ));
             if (!latest || latest.messages.length === 0) return;
-            const knownId = autoSaveConversationIdsRef.current.has(storageKey)
-              ? autoSaveConversationIdsRef.current.get(storageKey) ?? null
-              : latest.activeConversationId;
-            const savedId = await saveConversation(
-              latest.messages,
-              knownId,
-              tab.sessionId,
-              tab.conversationContextId,
-            );
-            autoSaveConversationIdsRef.current.set(storageKey, savedId);
+            await saveConversationSnapshot(latest);
           })
-          .catch(error => console.error('[autoSaveConversation]', error));
+          .catch(error => {
+            console.error('[autoSaveConversation]', error);
+            setAutoSaveFailure({
+              storageKey,
+              message: error instanceof Error ? error.message : '网络错误',
+            });
+          });
         autoSaveQueuesRef.current.set(storageKey, nextWrite);
       }, 1_200);
       autoSaveTimersRef.current.set(storageKey, timer);
     }
-  }, [tabs, saveConversation]);
+  }, [tabs, saveConversationSnapshot]);
 
   useEffect(() => () => {
     for (const timer of autoSaveTimersRef.current.values()) clearTimeout(timer);
@@ -486,6 +512,7 @@ export default function App() {
           activeConversationId: null,
           conversationContextId: createConversationContextId(),
           conversationSummary: '',
+          scheduler: data.scheduler,
           schedulerLabel: data.schedulerLabel,
         };
         setTabs(prev => [...prev, tab]);
@@ -842,12 +869,16 @@ export default function App() {
         activeTab={workbenchSidebarTab}
         onActiveTabChange={handleSidebarTabChange}
         connectedComputeCount={connectedComputeCount}
-        unreadCounts={{ compute: jobNotificationCenter.jobUnread, conversations: jobNotificationCenter.conversationUnread }}
+        unreadCounts={{
+          compute: jobNotificationCenter.jobUnread,
+          conversations: jobNotificationCenter.conversationUnread,
+          files: transferIndicators.failed || transferIndicators.active,
+        }}
         onOpenQQBotSettings={() => setShowQQBotSettings(true)}
         onOpenUpdateCenter={() => setShowUpdateCenter(true)}
         theme={theme}
         onToggleTheme={handleToggleTheme}
-        sessionId={activeTab?.sessionId}
+        sessionId={activeClusterTab?.sessionId}
         home={activeClusterTab?.home}
         activeConversationId={conversationTab?.activeConversationId}
         loadingConversationId={loadingConversationId}
@@ -896,6 +927,12 @@ export default function App() {
       />
 
       <main className="flex-1 min-w-0 h-full relative overflow-hidden bg-scholar-900">
+          {autoSaveFailure && (
+            <div role="alert" className="absolute left-1/2 top-3 z-50 flex max-w-[90%] -translate-x-1/2 items-center gap-3 rounded-lg border border-red-500/40 bg-scholar-950/95 px-3 py-2 text-xs text-red-300 shadow-lg">
+              <span className="break-words">自动保存失败：{autoSaveFailure.message}</span>
+              <button type="button" className="btn-ghost shrink-0 !px-2 !py-1 !text-[11px]" onClick={() => void retryAutoSave()}>重试保存</button>
+            </div>
+          )}
           {publicWeb && !conversationTab && (
             <div className="h-full flex flex-col items-center justify-center gap-4 p-6 text-center">
               <h1 className="text-xl text-scholar-100">连接你的集群，开始分析</h1>
@@ -917,6 +954,13 @@ export default function App() {
                 onSkillsChange={noopSkillsChange}
                 messages={conversationTab.messages}
                 onMessagesChange={chatCallbacks.onMessagesChange}
+                onSaveToCluster={async () => {
+                  const latest = tabsRef.current.find(tab => (
+                    tab.sessionId === conversationTab.sessionId
+                    && tab.conversationContextId === conversationTab.conversationContextId
+                  ));
+                  if (latest) await saveConversationSnapshot(latest);
+                }}
                 onNewChat={handleNewConversation}
                 triggerAI={triggerAI}
                 aiClusterControl={!!activeClusterTab && aiClusterControl}
@@ -969,6 +1013,7 @@ export default function App() {
                 socket={activeClusterTab ? (sockets[activeClusterTab.sessionId] ?? null) : null}
                 onClose={() => setWorkspaceView('chat')}
                 onRun={handleRunWorkflow}
+                onConnectCompute={() => setComputeBackendOpen(true)}
                 onPickFolder={activeClusterTab ? requestRemotePath : undefined}
                 onOpenRunFolder={path => openRemoteFolder(path, activeClusterTab?.sessionId)}
               />
@@ -1105,6 +1150,7 @@ export default function App() {
           pickFolder={pickFolderProp}
           endpoints={endpoints}
           openLocation={fileTransferLocation}
+          onTransferIndicatorsChange={setTransferIndicators}
         />
       </Suspense>}
 
@@ -1218,6 +1264,7 @@ function TabTerminal({
       isLoggedIn={true}
       isActive={isActive}
       sshSessionId={tab.sessionId}
+      scheduler={tab.scheduler || tab.schedulerLabel}
       onSocketReady={onSocketReady}
       onAnalyzeError={onAnalyzeError}
       onSendToAI={onSendToAI}

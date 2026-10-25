@@ -69,23 +69,48 @@ function extractCommandFor(path: string): string | undefined {
 }
 
 /** 选区内容 → 本地分析结果（类别、摘要数据、快捷操作按钮） */
-export function analyzeTerminalSelection(rawText: string): AssistAnalysis {
+export type TerminalScheduler = 'lsf' | 'slurm' | 'pbs' | 'donau' | 'none' | 'unknown';
+
+function normalizeScheduler(scheduler?: string | null): TerminalScheduler {
+  const value = (scheduler || '').toLowerCase();
+  if (value.includes('slurm')) return 'slurm';
+  if (value.includes('pbs') || value.includes('torque')) return 'pbs';
+  if (value.includes('donau') || value.includes('多瑙')) return 'donau';
+  if (value.includes('lsf')) return 'lsf';
+  if (value.includes('unknown') || value.includes('未知')) return 'unknown';
+  if (value.includes('none') || value.includes('无调度')) return 'none';
+  return value ? 'unknown' : 'lsf';
+}
+
+function jobCommands(jobId: string, scheduler?: string | null): [string, string, string] | null {
+  switch (normalizeScheduler(scheduler)) {
+    case 'slurm': return [`squeue -j ${jobId}`, `scontrol show job ${jobId}`, `scancel ${jobId}`];
+    case 'pbs': return [`qstat ${jobId}`, `tracejob ${jobId}`, `qdel ${jobId}`];
+    case 'donau': return [`djob ${jobId}`, `dpeek ${jobId}`, `dkill ${jobId}`];
+    case 'none': return [`ps -p ${jobId} -f`, `ps -p ${jobId} -f`, `kill ${jobId}`];
+    case 'lsf': return [`bjobs ${jobId}`, `bpeek ${jobId}`, `bkill ${jobId}`];
+    default: return null;
+  }
+}
+
+export function analyzeTerminalSelection(rawText: string, scheduler?: string | null): AssistAnalysis {
   const text = rawText ?? '';
   const trimmed = text.trim();
   if (!trimmed) {
     return { kind: 'text', charCount: 0, actions: [{ id: 'ai-explain', label: '发给 AI 解读', ai: 'explain' }] };
   }
 
-  // 1) 整段是 5–9 位纯数字 → 疑似作业号（LSF）
+  // 1) 整段是 5–9 位纯数字 → 疑似作业号，命令跟随当前集群调度器；未知时不猜 LSF。
   if (JOB_ID_REGEX.test(trimmed)) {
+    const commands = jobCommands(trimmed, scheduler);
     return {
       kind: 'job',
       jobId: trimmed,
-      actions: [
-        { id: 'job-status', label: '查看作业', command: `bjobs ${trimmed}` },
-        { id: 'job-output', label: '查看输出', command: `bpeek ${trimmed}` },
-        { id: 'job-kill', label: '终止作业', command: `bkill ${trimmed}` },
-      ],
+      actions: commands ? [
+        { id: 'job-status', label: '查看作业', command: commands[0] },
+        { id: 'job-output', label: '查看输出', command: commands[1] },
+        { id: 'job-kill', label: '终止作业', command: commands[2] },
+      ] : [{ id: 'ai-explain', label: '发给 AI 解读', ai: 'explain' }],
     };
   }
 
@@ -136,21 +161,22 @@ export type AssistIntent =
  * 小窗输入框的自然语言操作 → 确定命令。
  * 每条规则都要求选区分析具备对应能力（如"解压"要求选中压缩包），否则落到 ai 兜底。
  */
-export function resolveAssistIntent(input: string, analysis: AssistAnalysis): AssistIntent {
+export function resolveAssistIntent(input: string, analysis: AssistAnalysis, scheduler?: string | null): AssistIntent {
   const text = input.trim().toLowerCase();
   if (!text) return { kind: 'ai' };
 
   if (/解压|extract|unzip|untar/.test(text) && analysis.extractCommand) {
     return { kind: 'command', command: analysis.extractCommand };
   }
-  if (/终止|杀掉|杀|结束|kill|bkill/.test(text) && analysis.jobId) {
-    return { kind: 'command', command: `bkill ${analysis.jobId}` };
+  const commands = analysis.jobId ? jobCommands(analysis.jobId, scheduler) : null;
+  if (/终止|杀掉|杀|结束|kill|bkill|scancel|qdel/.test(text) && commands) {
+    return { kind: 'command', command: commands[2] };
   }
-  if (/输出|bpeek/.test(text) && analysis.jobId) {
-    return { kind: 'command', command: `bpeek ${analysis.jobId}` };
+  if (/输出|bpeek|tracejob/.test(text) && commands) {
+    return { kind: 'command', command: commands[1] };
   }
-  if (/查看|状态|看看|status|bjobs/.test(text)) {
-    if (analysis.jobId) return { kind: 'command', command: `bjobs ${analysis.jobId}` };
+  if (/查看|状态|看看|status|bjobs|squeue|qstat/.test(text)) {
+    if (commands) return { kind: 'command', command: commands[0] };
     if (analysis.path) return { kind: 'command', command: `ls -la ${quote(analysis.path)}` };
   }
   if (/进入|跳转|打开|\bcd\b/.test(text) && analysis.directory) {

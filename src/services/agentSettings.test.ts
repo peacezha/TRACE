@@ -5,16 +5,17 @@ import { loadAgentSettings, normalizeAgentSettings, saveAgentSettings } from './
 describe('agent settings', () => {
   beforeEach(() => localStorage.clear());
 
-  it('uses full-access bounded defaults', () => {
+  it('uses scoped bounded defaults and preserves explicit full access', () => {
     expect(normalizeAgentSettings({ maxCommands: 999, maxSteps: 1 })).toEqual({
       engine: 'auto',
       planningPolicy: 'auto',
       confirmationPolicy: 'dangerous',
-      pathPolicy: 'full_access',
+      pathPolicy: 'scoped',
       maxCommands: 200,
       maxSteps: 10,
       planReview: 'auto',
     });
+    expect(normalizeAgentSettings({ pathPolicy: 'full_access' }).pathPolicy).toBe('full_access');
   });
 
   it('defaults new installations to a longer 200-step run', () => {

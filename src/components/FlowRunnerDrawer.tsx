@@ -51,6 +51,8 @@ interface FlowRunnerDrawerProps {
   onOpenRunFolder?: (path: string) => void;
   /** 作为 AI 工作台主页面呈现，而不是右侧覆盖抽屉。 */
   embedded?: boolean;
+  /** 本地工作台未连接计算资源时，打开计算资源管理/连接入口。 */
+  onConnectCompute?: () => void;
 }
 
 export const RUN_STATUS: Record<string, { label: string; cls: string }> = {
@@ -103,7 +105,8 @@ export function isWorkflowParamRequired(p: Workflow['params'][number]): boolean 
   return p.required ?? !p.defaultValue;
 }
 
-export default function FlowRunnerDrawer({ workflow, sessionId, socket, onClose, onRun, onPickFolder, onOpenRunFolder, embedded = false }: FlowRunnerDrawerProps) {
+export default function FlowRunnerDrawer({ workflow, sessionId: requestedSessionId, socket, onClose, onRun, onPickFolder, onOpenRunFolder, embedded = false, onConnectCompute }: FlowRunnerDrawerProps) {
+  const sessionId = requestedSessionId === 'local-workbench' ? null : requestedSessionId;
   const displayText = useWorkflowText();
   const [initialHabit] = useState(() => getWorkflowHabitSuggestion(workflow.id));
   const [preflight, setPreflight] = useState<PreflightResult | null | undefined>(undefined);
@@ -218,6 +221,17 @@ export default function FlowRunnerDrawer({ workflow, sessionId, socket, onClose,
     setStepCommandOverrides({});
     setConfigNotice('已恢复流程默认配置');
   }, [workflow]);
+
+  const requestResetConfig = useCallback(() => {
+    const modified = inputs.length > 0
+      || Object.keys(refOverrides).length > 0
+      || skippedSteps.length > 0
+      || Object.keys(stepCommandOverrides).length > 0
+      || JSON.stringify(paramValues) !== JSON.stringify(defaultParamValues(workflow))
+      || JSON.stringify(stepValues) !== JSON.stringify(defaultStepValues(workflow));
+    if (modified && !window.confirm('当前流程配置有修改，确定放弃这些修改并恢复默认吗？')) return;
+    resetConfig();
+  }, [inputs, paramValues, refOverrides, resetConfig, skippedSteps, stepCommandOverrides, stepValues, workflow]);
 
   // ── 预检：进入面板先读缓存 ──
   useEffect(() => {
@@ -580,6 +594,12 @@ export default function FlowRunnerDrawer({ workflow, sessionId, socket, onClose,
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {!sessionId && (
+          <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+            <p>流程运行需要计算资源。当前本地工作台只能编辑配置，连接计算资源后才能检查环境并运行。</p>
+            {onConnectCompute && <button type="button" onClick={onConnectCompute} className="btn-primary mt-2 !px-3 !py-1.5 !text-[11px]">连接计算资源</button>}
+          </section>
+        )}
         {isPendingDisposal(workflow) && <section className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm leading-6 text-amber-400">
           <p>{displayText('此流程在待弃置中，不能发起新运行。请在流程管理中恢复；已有任务不受影响。')}</p>
           <p data-user-content="true">{workflow.lifecycle?.reason || displayText(workflowDisposalReason(workflow))}</p>
@@ -924,7 +944,7 @@ export default function FlowRunnerDrawer({ workflow, sessionId, socket, onClose,
         <div className="flex items-center gap-2">
           <button type="button" onClick={saveCurrentConfig} className="btn-ghost !text-[11px] !px-2">保存配置</button>
           <button type="button" onClick={loadSavedConfig} className="btn-ghost !text-[11px] !px-2">载入配置</button>
-          <button type="button" onClick={resetConfig} className="btn-ghost !text-[11px] !px-2">恢复默认</button>
+          <button type="button" onClick={requestResetConfig} className="btn-ghost !text-[11px] !px-2">恢复默认</button>
           <button type="button" onClick={() => {
             clearWorkflowHabits(workflow.id);
             resetConfig();
