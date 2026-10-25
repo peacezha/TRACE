@@ -43,7 +43,7 @@ jobs:
       - name: Verify chat, continuous execution and workflow dependencies
         run: npx vitest run src/components/AIChat.test.tsx src/components/WorkflowRunCard.test.tsx src/components/FlowRunnerDrawer.test.tsx src/components/WorkflowFlowGraph.test.tsx src/features/workflows/flowGraphLayout.test.ts shared/workflowExecution.test.ts shared/workflowDependencies.test.ts shared/workflowCatalog.test.ts server/ai/jobWakeQueue.test.ts server/ai/legacyJobResumer.test.ts server/dsh/dshJobResumer.test.ts server/dsh/dshTranslate.test.ts server/dsh/jobAgentBindings.test.ts server/notifications/jobWatcher.test.ts server/workflows/formalWorkflowContinuations.test.ts server/workflows/runAnnotate.test.ts server/workflows/workflowRunService.test.ts server/workflows/chipseqDag.test.ts --maxWorkers 1 --minWorkers 1
       - run: npm run prepare:platform
-      - run: ulimit -n 65536 && npm run electron:mac
+      - run: ulimit -n 262144 && npm run electron:mac
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
       - run: node scripts/smoke-macos.mjs
