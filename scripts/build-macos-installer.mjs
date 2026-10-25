@@ -1,7 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { build, Platform, Arch } from 'electron-builder';
+import { signApp } from '@electron/osx-sign';
 import { fileURLToPath } from 'node:url';
+
+const execFileAsync = promisify(execFile);
+
+// @electron/osx-sign probes every file concurrently before applying signIgnore.
+// Move the large text-only DSH tree out during the ad-hoc pass, then restore it
+// and sign only its two native PTY files before sealing the app again.
+async function signAdHocWithoutDsh(configuration) {
+  const app = configuration.app;
+  const dsh = path.join(app, 'Contents', 'Resources', 'app.asar.unpacked', 'vendor', 'dsh');
+  const backup = path.join(path.dirname(app), 'TRACE-dsh-signing-backup');
+  if (!fs.existsSync(dsh)) return signApp(configuration);
+  await fs.promises.rename(dsh, backup);
+  try {
+    await signApp(configuration);
+    await fs.promises.rename(backup, dsh);
+    const nativeDir = path.join(dsh, 'node_modules', 'node-pty', 'prebuilds', `darwin-${arch}`);
+    for (const file of ['pty.node', 'spawn-helper']) {
+      const binary = path.join(nativeDir, file);
+      if (fs.existsSync(binary)) await execFileAsync('codesign', ['--sign', '-', '--force', binary]);
+    }
+    const options = configuration.optionsForFile?.(app) || {};
+    const args = ['--sign', '-', '--force'];
+    if (options.hardenedRuntime) args.push('--options', 'runtime');
+    if (options.entitlements) args.push('--entitlements', options.entitlements);
+    await execFileAsync('codesign', [...args, app]);
+    await execFileAsync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
+  } finally {
+    if (fs.existsSync(backup)) await fs.promises.rename(backup, dsh);
+  }
+}
 
 if (process.platform !== 'darwin') throw new Error('DMG must be built on macOS; use the GitHub macOS packaging workflow');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -26,10 +59,7 @@ await build({
       category: 'public.app-category.productivity',
       artifactName: 'TRACE-${version}-mac-${arch}.${ext}',
       // An ad-hoc signature preserves Apple Silicon executable integrity, but is not Developer ID / notarization.
-      ...(signed ? {} : { identity: '-' }),
-      // codesign must not be invoked for every text file in the bundled DSH dependency tree.
-      // Keep the architecture-specific PTY native binary and spawn-helper signed.
-      signIgnore: [`app\\.asar\\.unpacked/vendor/dsh/(?!node_modules/node-pty/prebuilds/darwin-${arch}/(?:pty\\.node|spawn-helper)$)`],
+      ...(signed ? {} : { identity: '-', sign: signAdHocWithoutDsh }),
       hardenedRuntime: signed,
       notarize: signed && Boolean(process.env.APPLE_API_KEY || process.env.APPLE_ID),
     },
