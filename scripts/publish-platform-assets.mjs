@@ -25,7 +25,7 @@ else if (response.status === 404) {
 } else throw new Error('Existing release not found: ' + response.status);
 const files = fs.readdirSync(directory).filter(name => name.startsWith(prefix)
   && /^(?:mac-(?:arm64|x64)\.(?:dmg|zip)|web-linux-x64\.tar\.gz(?:\.sha256)?|public-web-linux-x64-node20\.tar\.gz(?:\.sha256)?|platforms-[\w.-]+\.json)$/.test(name.slice(prefix.length)));
-for (const needed of [prefix + 'mac-arm64.dmg', prefix + 'mac-x64.dmg', prefix + 'public-web-linux-x64-node20.tar.gz']) {
+for (const needed of [prefix + 'mac-arm64.dmg', prefix + 'mac-x64.dmg']) {
   if (!files.includes(needed)) throw new Error('Incomplete platform build: ' + needed);
 }
 const hashes = new Map();
