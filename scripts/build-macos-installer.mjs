@@ -27,6 +27,9 @@ await build({
       artifactName: 'TRACE-${version}-mac-${arch}.${ext}',
       // An ad-hoc signature preserves Apple Silicon executable integrity, but is not Developer ID / notarization.
       ...(signed ? {} : { identity: '-' }),
+      // codesign must not be invoked for every text file in the bundled DSH dependency tree.
+      // Keep the architecture-specific PTY native binary and spawn-helper signed.
+      signIgnore: [`app\\.asar\\.unpacked/vendor/dsh/(?!node_modules/node-pty/prebuilds/darwin-${arch}/(?:pty\\.node|spawn-helper)$)`],
       hardenedRuntime: signed,
       notarize: signed && Boolean(process.env.APPLE_API_KEY || process.env.APPLE_ID),
     },
