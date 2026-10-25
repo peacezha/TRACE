@@ -81,7 +81,7 @@ describe('WorkflowRunCard', () => {
     fireEvent.click(await screen.findByText('仍要继续（不推荐）'));
     expect(resumeWorkflowRun).not.toHaveBeenCalled();
     expect(screen.getByRole('alert')).toHaveTextContent('不建议继续下游分析');
-    fireEvent.click(screen.getByText('确认风险并继续'));
+    fireEvent.click(await screen.findByText('确认风险并继续'));
     await waitFor(() => expect(resumeWorkflowRun).toHaveBeenCalledWith(CONTEXT.runDir, 4, 's1', true));
     expect(onSendMessage).toHaveBeenCalled();
     expect(screen.getByRole('alert')).toHaveTextContent('这不代表质控通过');

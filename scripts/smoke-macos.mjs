@@ -42,13 +42,14 @@ try {
   let ready = false;
   for (let index = 0; index < 120; index++) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/app-info`);
-      if (response.ok && (await response.json()).capabilities.cluster) { ready = true; break; }
+      // The public liveness route is callable without the random per-boot desktop token.
+      if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) { ready = true; break; }
     } catch {}
     if (child.exitCode !== null) throw new Error('Packaged Mac app exited: ' + log.slice(-4000));
     await new Promise(resolve => setTimeout(resolve, 500));
   }
-  assert(ready, 'Packaged Mac app backend did not start');
+  assert(ready, 'Packaged Mac app backend did not start: ' + log.slice(-4000));
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/app-info`)).status, 403);
   const html = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(html.status, 200);
   assert((await html.text()).includes('/assets/index-'));

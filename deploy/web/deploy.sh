@@ -11,7 +11,7 @@ case "${1:-}" in
     port="${3:-3003}"
     [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) || { echo "端口须为 1024–65535"; exit 1; }
     umask 077
-    printf 'HPCLAW_WEB_ORIGIN=%s\nHPCLAW_BIND_IP=0.0.0.0\nHPCLAW_PORT=%s\n' "${public_url%/}" "$port" > .env
+    printf 'TRACE_WEB_ORIGIN=%s\nTRACE_BIND_IP=0.0.0.0\nTRACE_PORT=%s\n' "${public_url%/}" "$port" > .env
     ;;
   --password)
     docker compose exec -T hpclaw node -e "const f=require('fs');const c=JSON.parse(f.readFileSync('/data/web-access.json','utf8'));console.log('Username:',c.username);console.log('Password:',c.password)"
@@ -23,7 +23,7 @@ case "${1:-}" in
   "")
     if [[ ! -e .env ]]; then
       umask 077
-      printf 'HPCLAW_WEB_ORIGIN=http://127.0.0.1:3003\nHPCLAW_BIND_IP=127.0.0.1\nHPCLAW_PORT=3003\n' > .env
+      printf 'TRACE_WEB_ORIGIN=http://127.0.0.1:3003\nTRACE_BIND_IP=127.0.0.1\nTRACE_PORT=3003\n' > .env
     fi
     ;;
   *) echo "用法: ./deploy.sh [--url http://服务器IP:3003 [端口] | --password | --status | --stop | --logs]"; exit 1 ;;

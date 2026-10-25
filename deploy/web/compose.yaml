@@ -2,16 +2,16 @@ name: hpclaw-web
 services:
   hpclaw:
     build: .
-    image: hpclaw-web:0.4.41
+    image: trace-web:0.5.14
     init: true
     restart: unless-stopped
     stop_grace_period: 15s
     ports:
-      - "${HPCLAW_BIND_IP:-127.0.0.1}:${HPCLAW_PORT:-3003}:3003"
+      - "${TRACE_BIND_IP:-127.0.0.1}:${TRACE_PORT:-3003}:3003"
     environment:
-      HPCLAW_WEB_ORIGIN: "${HPCLAW_WEB_ORIGIN:-http://127.0.0.1:3003}"
-      HPCLAW_WEB_COOKIE_SECURE: "${HPCLAW_WEB_COOKIE_SECURE:-0}"
-      HPCLAW_TRUST_PROXY: "${HPCLAW_TRUST_PROXY:-0}"
+      TRACE_WEB_ORIGIN: "${TRACE_WEB_ORIGIN:-http://127.0.0.1:3003}"
+      TRACE_WEB_COOKIE_SECURE: "${TRACE_WEB_COOKIE_SECURE:-0}"
+      TRACE_TRUST_PROXY: "${TRACE_TRUST_PROXY:-0}"
     volumes:
       - hpclaw-data:/data
     logging:
