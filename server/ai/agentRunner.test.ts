@@ -283,19 +283,31 @@ describe('runAgent ask_user handling', () => {
     expect(onAsk).not.toHaveBeenCalled();
   });
 
-  it('converts a plain-text choice question into a real ask with options', async () => {
+  it('keeps a plain-text question as a normal answer instead of inventing a generic question card', async () => {
     const onAsk = vi.fn(); const onDone = vi.fn();
+    const answer = '文献侧只有 peak BED，无法给你 bw/BAM。比对请选一个方向，我按你选的提交作业：';
     mockStreamText.mockImplementation((options: any) => ({ fullStream: (async function* () {
-      yield { type: 'text-delta', text: '文献侧只有 peak BED，无法给你 bw/BAM。比对请选一个方向，我按你选的提交作业：' };
+      yield { type: 'text-delta', text: answer };
     })() }));
     await runAgent({ sid: 'question-test', run: vi.fn(), profile: { provider: 'deepseek', model: 'test', apiKey: 'test' } },
       { onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onToolResult: vi.fn(), onStep: vi.fn(), onAsk, onDone, onErr: vi.fn(), sig: () => undefined },
       [{ role: 'user', content: '文献里有没有 bam 或 bw 文件，我要和我的做比对' }]);
-    expect(onAsk).toHaveBeenCalledTimes(1);
-    const [question, options] = onAsk.mock.calls[0] as unknown as [string, string[]];
-    expect(question).toContain('请选一个方向');
-    expect(options.length).toBeGreaterThanOrEqual(2);
-    expect(onDone).toHaveBeenCalledWith('__ASK__');
+    expect(onAsk).not.toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledWith(answer);
+  });
+
+  it('does not fold a substantive solution into a follow-up question', async () => {
+    const onAsk = vi.fn(); const onDone = vi.fn();
+    const answer = '建议采用方案 A：先保留现有 BAM，只重建损坏的索引，因为这样可以避免重算。\n\n方案 B 仅在索引修复失败时重跑比对，耗时更长且会覆盖现有结果。\n\n你要我按哪个方案执行？';
+    mockStreamText.mockImplementation((options: any) => ({ fullStream: (async function* () {
+      yield { type: 'text-delta', text: answer };
+    })() }));
+    await runAgent({ sid: 'question-test', run: vi.fn(), profile: { provider: 'deepseek', model: 'test', apiKey: 'test' } },
+      { onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onToolResult: vi.fn(), onStep: vi.fn(), onAsk, onDone, onErr: vi.fn(), sig: () => undefined },
+      [{ role: 'user', content: '有哪些修复方案？' }]);
+    expect(onAsk).not.toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledWith(answer);
+    expect(onDone.mock.calls[0][0]).toContain('建议采用方案 A');
   });
   it('keeps formal RUN tools out of a general cluster conversation', async () => {
     mockStreamText.mockImplementation((options: any) => ({

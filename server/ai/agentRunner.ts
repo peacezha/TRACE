@@ -39,7 +39,6 @@ import type { WorkflowExecutionContext } from '../../shared/workflowExecution';
 import type { WorkflowRunPatch } from '../../shared/workflowRun';
 import { qcPauseReason, unresolvedQcFailures } from '../../shared/workflowQc';
 import { ensureUserChoiceOptions } from '../../shared/askOptions';
-import { looksLikeAwaitingUserChoice } from '../../shared/questionIntent';
 import { isClarificationRequest, clarificationInstruction } from '../../shared/questionIntent';
 import { getQuestionLoopGuard } from './questionLoopGuard';
 import { searchPublicResource } from './publicResourceSearch';
@@ -476,6 +475,7 @@ ${workflowScoped ? `正式流程退出硬规则（服务端会校验，不能用
 
 ` : ''}ASK USER - 向用户提问的规矩:
 - 目标和路径明确时主动完成，不要把命令丢回给用户自己跑，也不要把生信操作负担推回用户；仅在真正被挡住时（缺必要参数、路径不明、多个方案会改变结果、或运行时要求确认高风险操作）才暂停提问，不要为常规技术细节打扰非专业用户。
+- 已经能给出方案时，直接完整输出推荐方案、其他选择、依据和风险，然后结束；不要在答案末尾再问“是否继续/选哪个/要不要我执行”，不要把完整分析改写成一句反问。
 - ask_user 必须提供 2-4 个具体、互斥、可直接执行的选项：第一个为推荐项并附一句理由，每个选项带一句简短说明；禁止“请选择”“怎么办”这类不带建议的空泛提问。
 - 调用 ask_user 后立即停止本轮，不要边等边做；用户的回答会作为下一条消息到来。
 
@@ -2696,15 +2696,6 @@ export async function runAgent(
     if (!finalDoneText && workflowExecutor && activeWorkflowRun) {
       const stepInfo = `${activeWorkflowRun.currentStep ?? '?'}/${activeWorkflowRun.totalSteps ?? '?'}`;
       cb.onDone(`本轮已结束。当前流程状态:${activeWorkflowRun.status || '未知'},进行到第 ${stepInfo} 步。`);
-    } else if (!guardDoneText && !askedUser && finalDoneText && looksLikeAwaitingUserChoice(finalDoneText)) {
-      // 模型把"等用户选择"写成了普通文本而没有调用 ask_user(实测:用户只看到
-      // 一段无按钮的文字,没有建议选项)。转成正式提问:前端会渲染带选项的卡片,
-      // 回答作为下一轮用户消息进来;本轮按 ask 收尾。
-      const options = ensureUserChoiceOptions(finalDoneText, [], ctx.locale);
-      console.warn('[Agent] 模型用文字提问而未调用 ask_user,已转为带选项的正式提问');
-      askedUser = true;
-      cb.onAsk(finalDoneText, options);
-      cb.onDone('__ASK__');
     } else {
       cb.onDone(finalDoneText);
     }

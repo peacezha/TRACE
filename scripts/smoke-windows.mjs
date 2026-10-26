@@ -316,6 +316,30 @@ try {
     modelServer.closeAllConnections(); await new Promise(resolve => modelServer.close(resolve)); modelServer = undefined;
     console.log('Packaged real AI stream passed the screenshot explanation follow-up: one local mock model request, no repeated question, command, approval or external AI call.');
   }
+  if (Number(expectedVersion.split('.')[2]) >= 56) {
+    const solution = 'ISOLATED_FULL_SOLUTION: keep the valid BAM and rebuild only the damaged index. Re-run alignment only if index repair fails.\n\nWhich option should I proceed with?';
+    modelServer = http.createServer(async (request, response) => {
+      let body = ''; for await (const chunk of request) body += chunk;
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const frame = (delta, finish_reason = null) => 'data: ' + JSON.stringify({ id: 'isolated-answer-fixture',
+        object: 'chat.completion.chunk', created: 1, model: 'deepseek-chat', choices: [{ index: 0, delta, finish_reason }] }) + '\n\n';
+      response.end(frame({ role: 'assistant', content: solution }) + frame({}, 'stop') + 'data: [DONE]\n\n');
+    });
+    await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
+    const response = await fetch('http://127.0.0.1:' + port + '/api/ai/stream', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-TRACE-Desktop-Token': 'isolated-package-smoke-only' },
+      body: JSON.stringify({ mode: 'agent', locale: 'zh-CN', workspace: temporary,
+        agentConfig: { engine: 'native', planningPolicy: 'auto', confirmationPolicy: 'always' },
+        messages: [{ role: 'user', content: '给出修复方案' }],
+        profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'isolated-fixture-only',
+          baseUrl: 'http://127.0.0.1:' + modelServer.address().port + '/v1' } }), signal: AbortSignal.timeout(60_000) });
+    assert.equal(response.status, 200);
+    const events = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+    assert(events.some(event => event.type === 'done' && event.content === solution), JSON.stringify(events).slice(-2000));
+    assert(!events.some(event => event.type === 'ask'), JSON.stringify(events).slice(-2000));
+    modelServer.closeAllConnections(); await new Promise(resolve => modelServer.close(resolve)); modelServer = undefined;
+    console.log('Packaged AI stream preserves a substantive answer ending in a question; no generic question card or folded solution.');
+  }
   if (process.env.TRACE_SMOKE_SKIP_NETWORK === '1') {
     console.log('Live literature-metadata network probe skipped explicitly (not counted as passed).');
   } else {

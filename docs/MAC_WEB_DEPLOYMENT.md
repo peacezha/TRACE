@@ -1,17 +1,17 @@
-# TRACE v0.5.14：macOS 安装与私有网页部署
+# TRACE v0.5.15：macOS 安装与私有网页部署
 
 本文适用于 macOS 桌面版和 **单用户私有网页包**。面向多位访客的公共服务必须使用 [公共网页 npm 部署指南](PUBLIC_WEB_DEPLOYMENT.md)，不能将私有实例直接开放给不互信用户。
 
 ## macOS 安装
 
-- Apple silicon：[下载 TRACE-0.5.14-mac-arm64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-mac-arm64.dmg)
-- Intel Mac：[下载 TRACE-0.5.14-mac-x64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-mac-x64.dmg)
+- Apple silicon：[下载 TRACE-0.5.15-mac-arm64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-mac-arm64.dmg)
+- Intel Mac：[下载 TRACE-0.5.15-mac-x64.dmg](https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-mac-x64.dmg)
 
 打开 DMG，将 TRACE 拖入 Applications，再从 Applications 启动，无需另装 Node.js。将 DMG 与平台合并校验清单下载到同一目录后核对：
 
 ```bash
-curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-platforms-SHA256SUMS.txt
-grep 'TRACE-0.5.14-mac-arm64.dmg$' TRACE-0.5.14-platforms-SHA256SUMS.txt | shasum -a 256 -c -
+curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-platforms-SHA256SUMS.txt
+grep 'TRACE-0.5.15-mac-arm64.dmg$' TRACE-0.5.15-platforms-SHA256SUMS.txt | shasum -a 256 -c -
 # Intel 包将两处 mac-arm64 改为 mac-x64
 ```
 
@@ -24,11 +24,11 @@ grep 'TRACE-0.5.14-mac-arm64.dmg$' TRACE-0.5.14-platforms-SHA256SUMS.txt | shasu
 目标环境：Linux x86_64/amd64，已安装 [Docker Engine](https://docs.docker.com/engine/install/) 与 [Docker Compose 插件](https://docs.docker.com/compose/install/)。x86_64 包不能直接用于 ARM 服务器；脚本不会安装系统软件或修改防火墙。
 
 ```bash
-curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-web-linux-x64.tar.gz
-curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.14/TRACE-0.5.14-web-linux-x64.tar.gz.sha256
-sha256sum -c TRACE-0.5.14-web-linux-x64.tar.gz.sha256
-tar -xzf TRACE-0.5.14-web-linux-x64.tar.gz
-cd TRACE-0.5.14-web-linux-x64
+curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-web-linux-x64.tar.gz
+curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-web-linux-x64.tar.gz.sha256
+sha256sum -c TRACE-0.5.15-web-linux-x64.tar.gz.sha256
+tar -xzf TRACE-0.5.15-web-linux-x64.tar.gz
+cd TRACE-0.5.15-web-linux-x64
 ./deploy.sh
 ./deploy.sh --password
 ```
