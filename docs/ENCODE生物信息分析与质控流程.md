@@ -23,7 +23,6 @@
 | `encode-mirnaseq` | miRNA-seq | cutadapt、miRDeep2 | 15–35 nt 占比、miRNA 映射率、rRNA/tRNA 污染 |
 | `encode-eclip` | eCLIP | cutadapt、STAR、umi_tools、CLIPper | PCR 重复率、input 归一化富集、重复间可重复峰 |
 | `encode-longread-rnaseq` | 长读长 RNA-seq | minimap2、TALON/FLAIR | 比对率、全长转录本比例、novel isoform 比例 |
-| `encode-rampage` | RAMPAGE | STAR | 5′ 端特异性、TSS 峰信噪比、重复一致性 |
 
 ---
 
@@ -324,31 +323,6 @@ ENCODE 统一流程是金标准基线，但按我们的实际使用场景做了�
 
 **产出文件**：`*.sorted.bam`、`*_talon.gtf`/`flair.collapse.isoforms.gtf`、
 `*_abundance.tsv`、`*_talon_read_annot.tsv`、`qc/qc.json`。
-
-## 12. RAMPAGE（`encode-rampage`）
-
-**用途**：5′ 端完整的启动子/TSS 高精度定量（capped mRNA 5′ 端测序）。
-
-**分析步骤**：
-
-1. FastQC 质控。
-2. STAR 比对（参数同 bulk RNA-seq 基因组比对部分）。
-3. TSS 峰识别：按 5′ 端 reads 聚类调用 TSS 峰（如 HOMER `findPeaks -style tss` 或 Paraclu），
-   并对启动子区域定量（counts per TSS/启动子）。
-4. QC：5′ 端特异性（reads 5′ 端在注释 TSS 附近的富集）、TSS 峰信噪比、重复间一致性。
-
-**质控指标与阈值**：
-
-| 指标 | 达标 | 警告 |
-|---|---|---|
-| 5′ 端特异性（TSS±50 bp 富集） | 明显尖峰，信噪比 >10 | 尖峰弥散 |
-| TSS 峰信噪比 | >10 | 5–10 |
-| 重复间一致性（启动子定量相关） | Spearman >0.9 | 0.8–0.9 |
-
-**产出文件**：`*.Aligned.sortedByCoord.out.bam`、`tss_peaks.bed`、
-`tss_quantification.tsv`、`qc/tss_enrichment.png`、`qc/qc.json`。
-
----
 
 ## 参考来源
 

@@ -73,10 +73,10 @@ describe('HiDOG V11 builtin workflows', () => {
     ) as Workflow[];
     const alignedIds = [
       'builtin-hidog-vector-trace', 'builtin-hidog-amplicon',
-      // 12 个 ENCODE 内置流程同样要求 dev 库与 builtinWorkflows() 逐字段一致
+      // 11 个 ENCODE 内置流程同样要求 dev 库与 builtinWorkflows() 逐字段一致
       'encode-chipseq-tf-dag', 'encode-chipseq-histone', 'encode-rnaseq-bulk', 'encode-atacseq',
       'encode-dnaseseq', 'encode-wgbs', 'encode-hic', 'encode-chiapet', 'encode-mirnaseq',
-      'encode-eclip', 'encode-longread-rnaseq', 'encode-rampage',
+      'encode-eclip', 'encode-longread-rnaseq',
     ];
     for (const id of alignedIds) {
       const fromStore = hidogWorkflow(id);

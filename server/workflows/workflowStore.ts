@@ -20,9 +20,9 @@ const SEED_MARKER_PATH = dataPath('workflows', '.bioskills-seed-version');
  * 避免删除的内置流程在下次启动时“复活”。
  */
 const DELETED_SEEDS_PATH = dataPath('workflows', 'deleted-builtin-seeds.json');
-const CATALOGUE_CLEANUP_PATH = dataPath('workflows', '.catalogue-cleanup-v0.4.54.json');
+const CATALOGUE_CLEANUP_PATH = dataPath('workflows', '.catalogue-cleanup-v0.5.16.json');
 export const REQUESTED_KEEP_IDS = new Set(['bioskills-atacseq-pipeline', 'bioskills-chipseq-pipeline']);
-export const REQUESTED_REMOVE_IDS = new Set(['bioskills-hic-pipeline', 'bioskills-clip-pipeline', 'bioskills-causal-genomics-pipeline', 'bioskills-crispr-editing-pipeline']);
+export const REQUESTED_REMOVE_IDS = new Set(['bioskills-hic-pipeline', 'bioskills-clip-pipeline', 'bioskills-causal-genomics-pipeline', 'bioskills-crispr-editing-pipeline', 'encode-rampage']);
 let requestedCleanupEnabled = false;
 export function enableRequestedCatalogueCleanup(): void { requestedCleanupEnabled = true; }
 /** bioSkills 种子版本：提取规则变化时递增，触发老库重新生成 */
@@ -76,7 +76,6 @@ export const BUILTIN_CATEGORIES: Record<string, string> = {
   'encode-mirnaseq': CATEGORY_TRANSCRIPTOME,
   'encode-eclip': CATEGORY_TRANSCRIPTOME,
   'encode-longread-rnaseq': CATEGORY_TRANSCRIPTOME,
-  'encode-rampage': CATEGORY_TRANSCRIPTOME,
   'bioskills-expression-to-pathways': CATEGORY_TRANSCRIPTOME,
   'bioskills-atacseq-pipeline': CATEGORY_TRANSCRIPTOME,
   'bioskills-chipseq-pipeline': CATEGORY_TRANSCRIPTOME,
@@ -977,52 +976,6 @@ export function builtinWorkflows(includeRetired = false): Workflow[] {
       updatedAt: now,
     },
     {
-      id: 'encode-rampage',
-      name: 'ENCODE RAMPAGE 分析与质控流程',
-      description: 'ENCODE RAMPAGE 统一流程：FastQC → STAR 比对 → TSS 峰识别与启动子定量 → 5\' 端特异性、TSS 峰信噪比与重复一致性评估。',
-      keywords: ['encode', 'rampage', 'tss', '启动子', '5端测序', 'star', 'cage', '定量', '质控'],
-      params: [
-        { name: 'INPUT_DIR', label: 'FASTQ directory (*_R1.fq.gz / *_R2.fq.gz)', type: 'path' },
-        { name: 'STAR_INDEX', label: 'STAR genome index directory', type: 'path', required: false, placeholder: '可留空，AI 运行时协助查找或构建' },
-        { name: 'GTF', label: 'Gene annotation GTF path', type: 'path', required: false, placeholder: '可留空，AI 运行时协助查找' },
-        { name: 'REF_FA', label: 'Reference genome FASTA', type: 'path', required: false, placeholder: '可留空，AI 运行时协助查找' },
-        { name: 'QUEUE', label: 'Queue', defaultValue: 'q2680v2', type: 'select', options: ['q2680v2', 'normal', 'smp', 'high'] },
-        { name: 'THREADS', label: 'Threads', defaultValue: '8', type: 'number' },
-      ],
-      steps: [
-        { title: 'Read-only preflight: software, inputs and references', command: 'module av FastQC STAR SAMtools HOMER Paraclu 确认可加载；ls -ld {{INPUT_DIR}}；ls -d {{STAR_INDEX}}；ls -l {{GTF}} {{REF_FA}}；缺失先问用户' },
-        { title: 'FastQC raw read QC', command: '#BSUB -J rampage_qc -n 1 -q {{QUEUE}}\nmodule load FastQC/0.11.9\ncd {{INPUT_DIR}} && mkdir -p fastqc_results\nfastqc *.fq.gz -o ./fastqc_results -t {{THREADS}}', notes: '写成 rampage_qc.lsf 后 bsub 提交；先看报告再决定后续' },
-        { title: 'STAR alignment', command: '#BSUB -J rampage_star -n {{THREADS}} -q {{QUEUE}}\nmodule load STAR/2.7.10b\ncd {{INPUT_DIR}}\nfor i in *_R1.fq.gz; do\n  s=${i%_R1.fq.gz}\n  STAR --runThreadN {{THREADS}} --genomeDir {{STAR_INDEX}} --readFilesIn "$i" "${s}_R2.fq.gz" --readFilesCommand zcat --outSAMtype BAM SortedByCoordinate --outFilterMultimapNmax 20 --outFilterMismatchNoverLmax 0.04 --alignIntronMin 20 --alignIntronMax 1000000 --outFileNamePrefix "${s}."\ndone', notes: '写成 rampage_star.lsf 后 bsub 提交；RAMPAGE 为 5\' 端双端测序；单端数据只传 R1' },
-        { title: 'TSS 峰识别与启动子定量', command: '#BSUB -J rampage_tss -n {{THREADS}} -q {{QUEUE}}\nmodule load BEDTools/2.30.0\ncd {{INPUT_DIR}} && mkdir -p tss\nPROM=$(ls *promoter*.bed *tss*.bed 2>/dev/null | head -1 || true)\nfor b in *.Aligned.sortedByCoord.out.bam; do\n  s=${b%.Aligned.sortedByCoord.out.bam}\n  bedtools genomecov -ibam "$b" -5 -bg > tss/"${s}".5end.bedGraph\n  if command -v findPeaks >/dev/null 2>&1 && command -v makeTagDirectory >/dev/null 2>&1; then\n    if makeTagDirectory tss/"${s}".tags "$b" > tss/"${s}".maketag.log 2>&1 && findPeaks tss/"${s}".tags -style tss -o tss/"${s}".tss_peaks.txt >> tss/"${s}".maketag.log 2>&1; then\n      grep -v \'^#\' tss/"${s}".tss_peaks.txt > tss/"${s}".tss_peaks.bed || true\n    else\n      echo "SKIP: HOMER TSS 峰聚类失败（${s}），详见 tss/${s}.maketag.log"\n    fi\n  else\n    echo "SKIP: 未找到 HOMER findPeaks/makeTagDirectory，跳过 TSS 峰聚类（${s}）；备选 Paraclu 需 4 列密度文件手动运行"\n  fi\n  if [ -z "$PROM" ]; then\n    echo "SKIP: 缺少启动子区 BED（TSS±2kb，可由 {{GTF}} 生成），跳过启动子定量（${s}）"\n  else\n    bedtools intersect -a tss/"${s}".5end.bedGraph -b "$PROM" -wo > tss/"${s}".promoter_counts.tsv\n  fi\ndone', notes: '-5 只统计 reads 5\' 端；聚类最小簇高/密度参数按默认或写入步骤参数；启动子定量用于重复一致性评估' },
-        { title: 'QC：5\' 端特异性、TSS 峰信噪比与重复一致性', command: '#BSUB -J rampage_tss_qc -n 1 -q {{QUEUE}}\ncd {{INPUT_DIR}} && mkdir -p qc\npython3 - <<\'PY\'\nimport glob, json, os\nqc = {}\nfor bed in glob.glob("tss/*.tss_peaks.bed"):\n    with open(bed) as fh:\n        qc.setdefault("_tss_peaks", {})[os.path.basename(bed)] = sum(1 for line in fh if line.strip())\nqc["_files"] = sorted(glob.glob("tss/*.promoter_counts.tsv"))\nqc["_rule"] = "5\' 端在注释 TSS±50bp 应富集成尖峰（信噪比 >10）；重复间启动子定量 Spearman 按对齐计数计算（同 encode-rnaseq-bulk 的 spearman 逻辑）"\nwith open("qc/qc.json", "w") as out:\n    json.dump(qc, out, indent=2, ensure_ascii=False)\nPY', notes: '达标：5\' 端 TSS±50bp 富集明显、TSS 峰信噪比 >10、重复间 Spearman >0.9；警告：信噪比 5-10 或 Spearman 0.8-0.9' },
-        { title: 'Generate analysis report', command: 'python3 <RUN>/tools/encode_native_report.py --run-dir <RUN> --input-dir {{INPUT_DIR}} --report-dir <RUN>/reports/final-report\ntest -s <RUN>/reports/final-report/report.html', notes: '确定性报告生成器直接读取真实产物（QC 指标/峰文件/图）生成图文并茂的 HTML+MD 报告；AI 只需在回复里补充一段结论解读并给出报告绝对路径，不要重写报告文件' },
-      ],
-      manifest: {
-        software: [
-          { name: 'FastQC', module: 'FastQC/0.11.9', required: true },
-          { name: 'STAR', module: 'STAR/2.7.10b', required: true },
-          { name: 'SAMtools', module: 'SAMtools/1.17', required: true },
-          { name: 'BEDTools', module: 'BEDTools/2.30.0', required: true },
-          { name: 'HOMER（TSS 峰聚类备选）', checkCmd: 'command -v findPeaks', required: false },
-          { name: 'Paraclu（TSS 峰聚类备选）', checkCmd: 'command -v paraclu', required: false },
-        ],
-        references: [
-          { name: 'STAR genome index', path: '{{STAR_INDEX}}', type: 'index', source: '可留空：AI 运行时协助查找或在 02_reference/ 下构建（STAR --runMode genomeGenerate）', required: false },
-          { name: 'Gene annotation GTF', path: '{{GTF}}', type: 'annotation', source: '可留空：AI 运行时协助从集群公共库 /share/database/ 匹配', required: false },
-          { name: 'Reference genome FASTA', path: '{{REF_FA}}', type: 'genome', source: '可留空：AI 运行时协助从集群公共库 /share/database/ 匹配', required: false },
-        ],
-        inputHint: 'RAMPAGE 双端 FASTQ 目录',
-        qcGates: [
-          { afterStep: 2, metric: 'FastQC 碱基质量与接头含量', pass: 'Q30 >80%，接头含量 <5%', warn: 'Q30 70-80% 或接头 5-15%' },
-          { afterStep: 3, metric: '比对率', pass: '>70%', warn: '50-70%' },
-          { afterStep: 5, metric: 'TSS 峰信噪比与重复一致性', pass: '信噪比 >10，Spearman >0.9', warn: '信噪比 5-10 或 Spearman 0.8-0.9' },
-        ],
-      },
-      source: 'builtin',
-      createdAt: now,
-      updatedAt: now,
-    },
-    {
       id: 'builtin-job-troubleshoot',
       name: '集群作业排查流程',
       description: '作业失败或卡住时的标准排查路径：状态 → 日志 → 资源 → 重投。',
@@ -1246,7 +1199,7 @@ async function cleanupRequestedCatalogueUnlocked(): Promise<void> {
     if (error.code !== 'ENOENT') throw error;
   }
   const now = Date.now();
-  const backupDir = dataPath('workflows', 'deleted-definitions', `catalogue-v0.4.54-${now}-${crypto.randomUUID()}`);
+  const backupDir = dataPath('workflows', 'deleted-definitions', `catalogue-v0.5.16-${now}-${crypto.randomUUID()}`);
   await fs.mkdir(backupDir, { recursive: true });
   try {
     const original = await fs.readFile(STORE_PATH);
@@ -1287,7 +1240,7 @@ async function cleanupRequestedCatalogueUnlocked(): Promise<void> {
   const kept = workflows.filter(w => !removedIds.has(w.id));
   await writeWorkflows(kept);
   const markerTmp = `${CATALOGUE_CLEANUP_PATH}.tmp`;
-  await fs.writeFile(markerTmp, JSON.stringify({ version: '0.4.54', at: now, removedIds: [...removedIds], retainedIds: [...REQUESTED_KEEP_IDS], backupDir }, null, 2), 'utf-8');
+  await fs.writeFile(markerTmp, JSON.stringify({ version: '0.5.16', at: now, removedIds: [...removedIds], retainedIds: [...REQUESTED_KEEP_IDS], backupDir }, null, 2), 'utf-8');
   await fs.rename(markerTmp, CATALOGUE_CLEANUP_PATH);
   await updateStoreCache(kept);
 }

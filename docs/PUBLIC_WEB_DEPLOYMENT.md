@@ -1,4 +1,4 @@
-# TRACE v0.5.15 公共网页部署（Linux / npm）
+# TRACE v0.5.16 公共网页部署（Linux / npm）
 
 公共网页包面向多位访客：每人使用自己的集群 SSH 账号和模型 API Key，无统一网站口令。它禁用部署服务器的本地文件、本地命令和 DSH，**不要改用私有网页包对外提供服务**。
 
@@ -7,11 +7,11 @@
 前提：Linux x64、正式版 Node.js **20.19.5+** 与 npm。生产环境还需要已配置证书的 HTTPS 域名和反向代理；长期运营请选择仍受官方维护的 Node.js LTS。
 
 ```bash
-curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-public-web-linux-x64-node20.tar.gz
-curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.15/TRACE-0.5.15-public-web-linux-x64-node20.tar.gz.sha256
-sha256sum -c TRACE-0.5.15-public-web-linux-x64-node20.tar.gz.sha256
-tar -xzf TRACE-0.5.15-public-web-linux-x64-node20.tar.gz
-cd TRACE-0.5.15-public-web-linux-x64-node20
+curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-public-web-linux-x64-node20.tar.gz
+curl -fLO https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-public-web-linux-x64-node20.tar.gz.sha256
+sha256sum -c TRACE-0.5.16-public-web-linux-x64-node20.tar.gz.sha256
+tar -xzf TRACE-0.5.16-public-web-linux-x64-node20.tar.gz
+cd TRACE-0.5.16-public-web-linux-x64-node20
 npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 npm start -- --url https://trace.example.org
 ```

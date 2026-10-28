@@ -83,7 +83,7 @@ if (Number(expectedVersion.split('.')[2]) >= 54) {
   assert(frontend.includes('How do I prepare my data? (Formats, templates and AI assistance)'));
   assert(frontend.includes('Copy template'));
   assert(frontend.includes('data-shortcut-scope'));
-  assert(backend.includes('.catalogue-cleanup-v0.4.54.json'));
+  assert(backend.includes('.catalogue-cleanup-v0.5.16.json'));
   console.log('Packaged native Edit-menu restoration, pane-scoped keyboard routing and explicit English data-preparation guide verified.');
 }
 if (Number(expectedVersion.split('.')[2]) >= 51) {
@@ -232,6 +232,10 @@ try {
         assert(initial.some(w => w.id === 'encode-hic'));
         assert(initial.some(w => w.id === 'encode-eclip'));
         console.log('Packaged v0.4.54 requested cleanup verified; retained workflows active, no pending definitions and independent ENCODE pipelines preserved.');
+      }
+      if (Number(expectedVersion.split('.')[2]) >= 56) {
+        assert(!initial.some(workflow => workflow.id === 'encode-rampage'));
+        console.log('Packaged v0.5.16 RAMPAGE/CAGE removal verified; historical run directories were not scanned or modified.');
       }
       for (const id of cleanedCatalogue ? [] : ['builtin-dapseq-tf-en', ...(Number(expectedVersion.split('.')[2]) < 52 ? ['encode-chipseq-tf-en'] : []), 'encode-chipseq-histone-en', 'encode-atacseq-en', ...(Number(expectedVersion.split('.')[2]) < 50 ? ['encode-chipseq-tf-dag'] : [])]) {
         assert.equal(initial.find(workflow => workflow.id === id)?.lifecycle?.state, 'pending_disposal');

@@ -593,80 +593,8 @@ function eclipPartnerWorkflow(now: number): Workflow {
   };
 }
 
-function rampageLegacyWorkflow(now: number): Workflow {
-  const repo = 'https://github.com/ENCODE-DCC/long-rna-seq-pipeline.git';
-  const ref = '94bb188c1cfb3e9af57d47aade1323a17b9c5332';
-  const dxencodeRepo = 'https://github.com/ENCODE-DCC/dxencode.git';
-  const dxencodeRef = '6b860e2c88fdcef36b735253c16f0628f5cee744';
-  const steps: WorkflowStep[] = [
-    repositoryStep('preflight', 'Preflight: DNAnexus, Python2 and launcher parameters', [], 'Prepare', partnerPreflight([
-      'command -v dx >/dev/null',
-      'command -v python2 >/dev/null',
-      'python2 -c "import dxpy"',
-      'dx whoami >/dev/null',
-      'test -n "{{DX_LAUNCH_ARGS}}"',
-      'test -n "{{DX_RESULT_PATH}}"',
-    ]), 'The public source of Portal ENCPL122WIM is DNAnexus applets; a logged-in dx environment is required.', []),
-    repositoryStep('source', 'Pin ENCODE RNA pipelines v2.3.5 legacy source', ['preflight'], 'Prepare', command(
-      'mkdir -p <RUN>/code',
-      `if [ ! -d <RUN>/code/long-rna-seq-pipeline/.git ]; then git clone --filter=blob:none --no-checkout ${repo} <RUN>/code/long-rna-seq-pipeline; fi`,
-      `git -C <RUN>/code/long-rna-seq-pipeline fetch --depth 1 origin ${ref}`,
-      `git -C <RUN>/code/long-rna-seq-pipeline checkout --detach ${ref}`,
-      'test -s <RUN>/code/long-rna-seq-pipeline/dnanexus/rampage/rampageLaunch.py',
-      `if [ ! -d <RUN>/code/dxencode/.git ]; then git clone --filter=blob:none --no-checkout ${dxencodeRepo} <RUN>/code/dxencode; fi`,
-      `git -C <RUN>/code/dxencode fetch --depth 1 origin ${dxencodeRef}`,
-      `git -C <RUN>/code/dxencode checkout --detach ${dxencodeRef}`,
-      'test -s <RUN>/code/dxencode/launch.py',
-    ), 'Pins the legacy DNAnexus RAMPAGE implementation referenced by the Portal, plus the ENCODE-DCC/dxencode module explicitly imported by the launcher.', ['<RUN>/code/long-rna-seq-pipeline/dnanexus/rampage', '<RUN>/code/dxencode/launch.py']),
-    repositoryStep('align', 'Launch official legacy rampage-align-pe', ['source', 'preflight'], 'Alignment', command(
-      'mkdir -p <RUN>/results',
-      'export PYTHONPATH="<RUN>/code/dxencode${PYTHONPATH:+:$PYTHONPATH}"',
-      'cd <RUN>/code/long-rna-seq-pipeline/dnanexus/rampage',
-      'python2 rampageLaunch.py {{DX_LAUNCH_ARGS}} | tee <RUN>/results/rampage-launch.log',
-    ), 'The launcher schedules applets on DNAnexus along REP/COMBINED_REPS branches.', ['<RUN>/results/rampage-launch.log']),
-    repositoryStep('signals', 'Four types of 5′ TSS signal tracks', ['align'], 'Signal', command(
-      'mkdir -p <RUN>/results/manifests',
-      'dx find data --path "{{DX_RESULT_PATH}}" --recurse | grep -E "5p_(plus|minus)(All|Uniq)\\.bw$" > <RUN>/results/manifests/rampage-signals.txt',
-      'test -s <RUN>/results/manifests/rampage-signals.txt',
-    ), 'all/unique × plus/minus bigWig, four tracks.', ['<RUN>/results/manifests/rampage-signals.txt']),
-    repositoryStep('peaks', 'TSS peaks and quantification', ['align'], 'Peak Calling', command(
-      'dx find data --path "{{DX_RESULT_PATH}}" --recurse | grep -E "(_peaks\\.(bed|bb|gff)|_peaks_quant\\.tsv)" > <RUN>/results/manifests/rampage-peaks.txt',
-      'test -s <RUN>/results/manifests/rampage-peaks.txt',
-    ), 'TSS peaks and quantification per replicate.', ['<RUN>/results/manifests/rampage-peaks.txt']),
-    repositoryStep('idr', 'TSS IDR on two replicates', ['peaks'], 'Reproducibility', command(
-      'dx find data --path "{{DX_RESULT_PATH}}" --recurse | grep -E "_idr\\.(bed|bb|png)" > <RUN>/results/manifests/rampage-idr.txt',
-      'test -s <RUN>/results/manifests/rampage-idr.txt',
-    ), 'The ENCPL122WIM spec requires IDR with exactly two replicates.', ['<RUN>/results/manifests/rampage-idr.txt']),
-    repositoryStep('mad-qc', 'TSS quantification MAD/correlation QC', ['peaks'], 'QC', command(
-      'dx find data --path "{{DX_RESULT_PATH}}" --recurse | grep -E "_mad_plot\\.png" > <RUN>/results/manifests/rampage-mad.txt',
-      'test -s <RUN>/results/manifests/rampage-mad.txt',
-    ), 'MAD and correlation of the two TSS quantification files.', ['<RUN>/results/manifests/rampage-mad.txt']),
-    repositoryStep('report', 'Save DNAnexus result index and Portal provenance', ['signals', 'idr', 'mad-qc'], 'Report', command(
-      `printf '%s\n' 'source=${repo}' 'ref=${ref}' 'dxencode_source=${dxencodeRepo}' 'dxencode_ref=${dxencodeRef}' 'portal=ENCPL122WIM' 'runtime=DNAnexus legacy applets' > <RUN>/results/ENCODE_PROVENANCE.txt`,
-      'dx find data --path "{{DX_RESULT_PATH}}" --recurse > <RUN>/results/dx-files.txt',
-    ), 'Explicitly records that this is a Portal-released legacy pipeline, not a local WDL port.', ['<RUN>/results/dx-files.txt', '<RUN>/results/ENCODE_PROVENANCE.txt']),
-  ];
-  return {
-    id: 'encode-rampage', name: 'ENCODE ENCPL122WIM · RAMPAGE/CAGE (legacy DNAnexus)',
-    description: 'Strictly invokes the legacy DNAnexus applets published on ENCODE Portal ENCPL122WIM: align, four types of 5′ signals, TSS peaks/quantification, two-replicate IDR and MAD QC. The legacy applets are not privately rewritten as "equivalent LSF scripts".',
-    keywords: ['encode', 'RAMPAGE', 'CAGE', 'ENCPL122WIM', 'TSS', 'IDR', 'DNAnexus'],
-    params: [
-      { name: 'DX_LAUNCH_ARGS', label: 'rampageLaunch.py official arguments', type: 'text', help: 'Run rampageLaunch.py --help first; arguments configure the ENCODE experiment, project, reference/control.' },
-      { name: 'DX_RESULT_PATH', label: 'DNAnexus result directory', type: 'text', placeholder: 'project-id:/rampage/...' },
-      { name: 'QUEUE', label: 'Local preflight queue (the launcher itself does not use LSF)', defaultValue: 'normal', type: 'text' },
-    ], steps,
-    manifest: {
-      software: [{ name: 'Git', checkCmd: 'command -v git', required: true }, { name: 'Python 2 + dxpy (legacy launcher)', checkCmd: 'command -v python2 && python2 -c "import dxpy"', required: true }, { name: 'DNAnexus dx CLI', checkCmd: 'command -v dx && dx whoami', required: true }],
-      references: [], inputHint: 'Use a DNAnexus environment that is logged in and can access the ENCODE applets/reference project.',
-      qcGates: [{ afterStep: 6, metric: 'TSS IDR and MAD', pass: 'Exactly two replicates produce both IDR and MAD outputs' }],
-    },
-    provenance: { provider: 'encode-dcc', sourceName: 'ENCODE legacy RAMPAGE pipeline', sourceUrl: `${repo.replace(/\.git$/, '')}/tree/v2.3.5/dnanexus/rampage`, sourceRef: `v2.3.5 (${ref})`, upstreamWorkflow: 'DNAnexus applets · ENCPL122WIM', implementation: 'official-wrapper', importerVersion: 'encode-wrapper-v1' },
-    source: 'builtin', createdAt: now, updatedAt: now,
-  };
-}
-
 /**
- * 官方 WDL 包装器（8 条）：dnase/wgbs/hic/chiapet/mirna/eclip/longread/rampage。
+ * 官方 WDL 包装器（7 条）：dnase/wgbs/hic/chiapet/mirna/eclip/longread。
  * chip-tf/chip-histone/atac/rnaseq 四条不在此构建——它们恢复为 workflowStore.ts 里的
  * TRACE 原生参数式流程（逐个指定参考文件，不走 genome TSV + Caper）。
  */
@@ -675,6 +603,5 @@ export function buildOfficialEncodeWorkflows(now: number): Workflow[] {
     ...otherOfficialWdlWorkflows(now),
     chipPetPartnerWorkflow(now),
     eclipPartnerWorkflow(now),
-    rampageLegacyWorkflow(now),
   ];
 }

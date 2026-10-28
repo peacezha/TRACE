@@ -20,7 +20,7 @@ assert(!rows.some(w => w.lifecycle?.state === 'pending_disposal'));
 for (const row of originalRows) if (row.lifecycle?.state === 'pending_disposal' && !store.REQUESTED_KEEP_IDS.has(row.id)) assert(!rows.some(w => w.id === row.id));
 assert(rows.some(w => w.id === 'encode-hic'));
 assert(rows.some(w => w.id === 'encode-eclip'));
-const marker = JSON.parse(await fs.readFile(path.join(temporary, 'workflows', '.catalogue-cleanup-v0.4.54.json'), 'utf-8'));
+const marker = JSON.parse(await fs.readFile(path.join(temporary, 'workflows', '.catalogue-cleanup-v0.5.16.json'), 'utf-8'));
 assert((await fs.readFile(path.join(marker.backupDir, 'original-catalogue.json'))).equals(original));
 assert((await fs.readFile(source)).equals(original), 'The source catalogue changed during the read-only verification');
 console.log(JSON.stringify({ originalDefinitions: originalRows.length, activeDefinitionsAfterUpgrade: rows.length,
