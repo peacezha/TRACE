@@ -86,11 +86,11 @@ describe('remote edit sessions', () => {
     await fs.promises.writeFile(session.localPath, 'version two');
     harness.watchers.get(session.localPath)!();
     harness.watchers.get(session.localPath)!();
-    await new Promise(resolve => setTimeout(resolve, 60));
-
-    const dirtyEvents = harness.onEvent.mock.calls.filter(([event]) => event === 'dirty');
-    expect(dirtyEvents).toHaveLength(1);
-    expect(dirtyEvents[0][1]).toMatchObject({ id: session.id, dirty: true });
+    await vi.waitFor(() => {
+      const dirtyEvents = harness.onEvent.mock.calls.filter(([event]) => event === 'dirty');
+      expect(dirtyEvents).toHaveLength(1);
+      expect(dirtyEvents[0][1]).toMatchObject({ id: session.id, dirty: true });
+    });
 
     harness.finishLaunch();
     await vi.waitFor(() => {
