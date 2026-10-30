@@ -144,7 +144,8 @@ export function createTranslator(hooks: TranslatorHooks): DshTranslator {
             send({ type: 'error', error: zh ? `dsh 引擎异常结束（${redactDshSensitiveText(kind)}）` : `DSH ended unexpectedly (${redactDshSensitiveText(kind)})` });
             return;
           }
-          const content = state.accumulatedText || state.lastAssistantText;
+          // 最后一条 assistant/message 才是面向用户的结论；各步中间分析只用于执行记录。
+          const content = state.lastAssistantText || state.accumulatedText;
           if (content.trim()) send({ type: 'done', content });
           else {
             console.error('[dsh] 引擎已结束，但没有返回可显示的回答');

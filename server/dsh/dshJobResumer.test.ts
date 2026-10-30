@@ -159,7 +159,7 @@ describe('maybeResumeAgent (sdk channel)', () => {
     expect(promptText).toContain('job output tail line');
     expect(promptText).toContain('请读取完整输出并继续之前的任务');
 
-    // 其他会话的事件被忽略；本会话 assistant/message 累积，turn/end 收尾
+    // 其他会话的事件被忽略；本会话最后一条 assistant 结论用于 turn/end 收尾
     deps.client.emit('other-sess', { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'noise' }] } } });
     deps.client.emit('dsh-sess-1', { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '任务完成，' }] } } });
     deps.client.emit('dsh-sess-1', { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '表达量正常。' }] } } });
@@ -168,15 +168,15 @@ describe('maybeResumeAgent (sdk channel)', () => {
 
     expect(deps.appendConversation).toHaveBeenCalledWith('conv-1', [
       { role: 'user', content: '【系统】作业 424242 已结束（DONE），已自动继续处理。' },
-      { role: 'assistant', content: '任务完成，表达量正常。' },
+      { role: 'assistant', content: '表达量正常。' },
     ], 'ssh-1');
     expect(deps.emitToUi).toHaveBeenCalledWith('ssh-1', {
       type: 'ai:resumed',
       conversationId: 'conv-1',
       jobId: '424242',
-      preview: '任务完成，表达量正常。',
+      preview: '表达量正常。',
     });
-    expect(deps.notify).toHaveBeenCalledWith('作业完成，AI 已继续处理', '任务完成，表达量正常。');
+    expect(deps.notify).toHaveBeenCalledWith('作业完成，AI 已继续处理', '表达量正常。');
     expect(deps.markResumed).toHaveBeenCalledWith('424242', 'ssh-1');
     expect(deps.client.subCount()).toBe(0);
   });

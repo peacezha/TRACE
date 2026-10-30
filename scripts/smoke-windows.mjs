@@ -344,6 +344,34 @@ try {
     modelServer.closeAllConnections(); await new Promise(resolve => modelServer.close(resolve)); modelServer = undefined;
     console.log('Packaged AI stream preserves a substantive answer ending in a question; no generic question card or folded solution.');
   }
+  if (Number(expectedVersion.split('.')[2]) >= 57) {
+    let requests = 0;
+    modelServer = http.createServer(async (request, response) => {
+      let body = ''; for await (const chunk of request) body += chunk;
+      requests++;
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const frame = (delta, finish_reason = null) => 'data: ' + JSON.stringify({ id: 'isolated-summary-fixture',
+        object: 'chat.completion.chunk', created: 1, model: 'deepseek-chat', choices: [{ index: 0, delta, finish_reason }] }) + '\n\n';
+      const content = requests === 1 ? '最终总结：文件已核实，没有未解决阻碍。' : '';
+      const reasoning = requests === 1 ? '内部思考：不应直接展示为答复。' : '';
+      response.end(frame({ role: 'assistant', content, reasoning_content: reasoning }) + frame({}, 'stop') + 'data: [DONE]\n\n');
+    });
+    await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
+    const response = await fetch('http://127.0.0.1:' + port + '/api/ai/stream', { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-TRACE-Desktop-Token': 'isolated-package-smoke-only' },
+      body: JSON.stringify({ mode: 'agent', locale: 'zh-CN', workspace: temporary,
+        agentConfig: { engine: 'native', planningPolicy: 'auto', confirmationPolicy: 'always' },
+        messages: [{ role: 'user', content: '给出结论' }],
+        profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'isolated-fixture-only',
+          baseUrl: 'http://127.0.0.1:' + modelServer.address().port + '/v1' } }), signal: AbortSignal.timeout(60_000) });
+    assert.equal(response.status, 200);
+    const events = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+    assert.equal(requests, 2);
+    assert(events.some(event => event.type === 'done' && event.content === '最终总结：文件已核实，没有未解决阻碍。'), JSON.stringify(events).slice(-2000));
+    assert(!events.some(event => event.type === 'done' && event.content.includes('内部思考')), JSON.stringify(events).slice(-2000));
+    modelServer.closeAllConnections(); await new Promise(resolve => modelServer.close(resolve)); modelServer = undefined;
+    console.log('Packaged reasoning-only turn produces a separate final summary, not internal thinking.');
+  }
   if (process.env.TRACE_SMOKE_SKIP_NETWORK === '1') {
     console.log('Live literature-metadata network probe skipped explicitly (not counted as passed).');
   } else {

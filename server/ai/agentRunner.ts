@@ -239,12 +239,12 @@ const MAX_SAME_COMMAND_REPEATS = 2;
 // repeat work. Eight guarded continuations give a multi-step workflow enough room
 // to finish while still failing closed to waiting_user on runaway loops.
 const MAX_FORMAL_WORKFLOW_CONTINUATIONS = 8;
-// 普通 Agent 对话的自动续跑下调到 4：旧版 8 轮叠加每轮强硬的“立即继续执行”
+// 普通 Agent 对话的自动续跑下调到 2：旧版 8 轮叠加每轮强硬的“立即继续执行”
 // 注入消息，让用户感觉“说了停还在干、不听指挥”。真正的长任务由续跑消息
 // 要求先汇报进展来缓解（用户能看到 AI 在做什么）；无进展循环仍由下方的
 // “连续只读诊断”检测器提前截断。
-const MAX_GENERAL_AGENT_CONTINUATIONS = 4;
-const MAX_GENERAL_DIAGNOSTIC_ONLY_ROUNDS = 3;
+const MAX_GENERAL_AGENT_CONTINUATIONS = 2;
+const MAX_GENERAL_DIAGNOSTIC_ONLY_ROUNDS = 2;
 const WORKFLOW_MAX_MODEL_STEPS_PER_TURN = 200;
 const FORMAL_WORKFLOW_STOP_STATUSES = new Set([
   'blocked_env', 'waiting_user', 'waiting_jobs', 'done', 'failed', 'cancelled', 'unknown',
@@ -480,6 +480,7 @@ ${workflowScoped ? `正式流程退出硬规则（服务端会校验，不能用
 - 调用 ask_user 后立即停止本轮，不要边等边做；用户的回答会作为下一条消息到来。
 
 EVIDENCE - 结论与证据:
+- 最后输出必须是一段简短结果总结，说明实际结果、证据和未解决阻碍；不要把内部思考或中间分析当成最终答复。
 - 明确报告四种结局之一：已完成并验证 / 已提交等待作业 / 失败 / 尚未验证。提交回执不是分析完成；传输超时不等于集群作业失败；生成的报告卡片不是测量证据。
 - 每个 QC 数字给出本轮读到的确切来源文件与字段；区分 reads 与 fragments、过滤前与过滤后；叙述、表格与图必须一致，冲突先调和再下结论。BAM 有效和比对率高只说明比对阶段结果，not overall library enrichment or assay success；对照样本看生物学适用性而非名字；基因组版本与有效基因组大小以核实过的参考证据为准，不用人工预设或未经核实的比例。必需的下游 QC 缺失时不得宣布样本 QC 通过。禁止用假设参数冒充文献报告的参数。
 - 只有流程步骤或用户明确要求时才生成报告；报告和产物写在 RUN/results/ 内，禁止为“完整”额外扫描或复制无关文件。
@@ -935,6 +936,8 @@ export async function runAgent(
     return promise.finally(() => { humanWaitDepth -= 1; });
   };
   let fullText = '';
+  let lastRoundText = '';
+  let fullReasoning = '';
   let askedUser = false;
   let guardDoneText = '';
   let runCommandCount = 0;
@@ -2470,10 +2473,12 @@ export async function runAgent(
             if (!fullText) console.log('[Agent] First text chunk received');
             fullText += part.text;
             roundText += part.text;
+            lastRoundText = roundText;
             // 正式流程的文字先缓冲。只有权威 run 状态真正停止后才展示，
             // 防止模型把“接下来准备做……”误当成最终回答导致界面像断流。
             if (!workflowExecutor) cb.onText(part.text);
           } else if (part.type === 'reasoning-delta') {
+            fullReasoning += part.text;
             cb.onReason(part.text);
           } else if (part.type === 'error') {
             const streamError = part.error;
@@ -2685,6 +2690,42 @@ export async function runAgent(
               : `【服务端自动续跑校验 ${formalContinuationCount}】你刚才在正式流程仍未进入停止状态时提前结束了回答。不要向用户重复中间汇报，也不要重复已有证据的命令。\n\n权威运行状态：\n${runSnapshot}\n\n本轮真实命令证据：\n${newEvidence || '(本轮没有执行命令；请立即读取当前步骤并继续)'}\n\n现在继续同一个流程：若证据足够，先 update_workflow_run 把当前步骤标记 done（必须填写真实 summary），然后读取下一步骤；若证据不足则只做当前步骤必要的定点验证。只有 run 状态成为 done / failed / cancelled / blocked_env / waiting_user / waiting_jobs，或调用 ask_user 后才能结束。`,
         },
       ];
+    }
+
+    // 多轮 Agent 的中间分析不能冒充最终答案。只在普通对话发生续跑，
+    // 或只有 reasoning 没有正文时，追加一次无工具的结果归纳；失败则退回
+    // 最后一轮正文，绝不把各轮思考按顺序拼接给用户。
+    if (!workflowExecutor && !askedUser && !guardDoneText
+      && (generalContinuationCount > 0 || (!fullText.trim() && fullReasoning.trim()))) {
+      const plan = planState.get();
+      const fallback = lastRoundText.trim() || fullText.trim();
+      try {
+        const summaryResult = streamText({
+          model,
+          system: ctx.locale === 'en-US'
+            ? 'Write only a concise final answer for the user. Do not reveal internal reasoning, drafts or repeated analysis. Report the actual result, evidence and any unresolved blocker. Do not call tools or invent new work.'
+            : '只写一段给用户看的最终总结。禁止输出内部思考、草稿或重复分析。概括实际结果、证据和仍未解决的阻碍。不得调用工具或编造新工作。',
+          messages: [{ role: 'user', content: `用户目标：${lastHumanText}\n\n当前计划：${plan ? compactPlanForContinuation(plan) : '(无保存计划)'}\n\n本轮正文：${fullText.slice(-6000)}\n\n最后一轮正文：${lastRoundText.slice(-3000)}\n\n仅作背景、不要复述的推理：${fullReasoning.slice(-3000)}` }],
+          tools: {},
+          maxOutputTokens: 2048,
+          abortSignal: askAbort.signal,
+        });
+        let summary = '';
+        await consumeAgentStream(summaryResult.fullStream, {
+          signal: askAbort.signal,
+          abortProvider: () => askAbort.abort(),
+          onPart: part => { if (part.type === 'text-delta') summary += part.text; },
+        });
+        fullText = summary.trim() || fallback;
+      } catch (error) {
+        console.warn('[Agent] final summary failed, using the last round response:', error instanceof Error ? error.message : String(error));
+        fullText = fallback;
+      }
+      if (!fullText.trim()) {
+        fullText = ctx.locale === 'en-US'
+          ? 'The turn ended without a displayable conclusion. Review the saved plan and current evidence before continuing.'
+          : '本轮没有形成可展示的结论。请查看已保存的计划和当前证据后再继续。';
+      }
     }
 
     const finalDoneText = guardDoneText

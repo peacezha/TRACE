@@ -337,7 +337,7 @@ describe('runAgent ask_user handling', () => {
       const current = round++;
       return {
         fullStream: (async function* () {
-          await options.tools.run_command.execute({ command: `sed -n '${current + 1}p' reference.sh` });
+          if (options.tools.run_command) await options.tools.run_command.execute({ command: `sed -n '${current + 1}p' reference.sh` });
           yield { type: 'text-delta', text: `第 ${current + 1} 轮只检查。` };
         })(),
       };
@@ -361,9 +361,52 @@ describe('runAgent ask_user handling', () => {
 
     expect(mockStreamText).toHaveBeenCalledTimes(3);
     expect(mockStreamText.mock.calls[1][0].messages.at(-1).content).toContain('先用已有证据作结论');
-    expect(mockStreamText.mock.calls[2][0].messages.at(-1).content).toContain('强制推进');
-    expect(visible.join('')).toContain('连续 3 个执行阶段只有只读诊断');
+    expect(mockStreamText.mock.calls[2][0].messages.at(-1).content).toContain('仅作背景、不要复述的推理');
+    expect(visible.join('')).toContain('连续 2 个执行阶段只有只读诊断');
     expect(visible.join('')).not.toContain('Agent 已自动续跑 3 次');
+  });
+
+  it('summarizes reasoning-only output instead of presenting internal thinking as the answer', async () => {
+    let round = 0;
+    const onDone = vi.fn();
+    mockStreamText.mockImplementation(() => ({
+      fullStream: (async function* () {
+        if (round++ === 0) yield { type: 'reasoning-delta', text: '这是内部思考，不应直接展示为最终答复。' };
+        else yield { type: 'text-delta', text: '最终总结：已完成核实，没有未解决阻碍。' };
+      })(),
+    }));
+    await runAgent({ sid: 'summary-test', run: vi.fn(), profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test' } },
+      { onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onToolResult: vi.fn(), onStep: vi.fn(), onAsk: vi.fn(), onDone, onErr: vi.fn(), sig: () => undefined },
+      [{ role: 'user', content: '给出结论' }]);
+    expect(mockStreamText).toHaveBeenCalledTimes(2);
+    expect(onDone).toHaveBeenCalledWith('最终总结：已完成核实，没有未解决阻碍。');
+    expect(onDone.mock.calls[0][0]).not.toContain('内部思考');
+  });
+
+  it('creates one final summary after a repeated continuation instead of concatenating every round', async () => {
+    let round = 0;
+    const onDone = vi.fn();
+    mockStreamText.mockImplementation((options: any) => ({
+      fullStream: (async function* () {
+        if (round++ === 0) yield { type: 'text-delta', text: '中间分析：先检查文件。' };
+        else if (round === 2) yield { type: 'text-delta', text: '继续分析：再次检查文件。' };
+        else {
+          expect(options.tools).toEqual({});
+          yield { type: 'text-delta', text: '最终总结：文件已核实，后续计划已暂停。' };
+        }
+      })(),
+    }));
+    await runAgent({
+      sid: 'summary-loop-test', run: vi.fn().mockResolvedValue('file evidence'),
+      resumePlan: { goal: '核实文件', createdAt: 1, updatedAt: 1,
+        steps: [{ id: '1', title: '检查文件', verification: '看到文件内容', status: 'running' }] },
+      profile: { provider: 'deepseek', model: 'deepseek-chat', apiKey: 'test' },
+    }, { onText: vi.fn(), onReason: vi.fn(), onToolCall: vi.fn(), onToolResult: vi.fn(), onStep: vi.fn(), onAsk: vi.fn(), onDone, onErr: vi.fn(), sig: () => undefined },
+      [{ role: 'user', content: '继续' }]);
+    expect(mockStreamText).toHaveBeenCalledTimes(3);
+    expect(onDone).toHaveBeenCalledWith('最终总结：文件已核实，后续计划已暂停。');
+    expect(onDone.mock.calls[0][0]).not.toContain('中间分析');
+    expect(onDone.mock.calls[0][0]).not.toContain('继续分析');
   });
 
   it('finishes the turn as an ask when ask_user is called without provider aborting the stream', async () => {
@@ -498,13 +541,13 @@ describe('runAgent ask_user handling', () => {
     const toolResults: string[] = [];
     mockStreamText.mockImplementation((options: any) => ({
       fullStream: (async function* () {
-        await options.tools.run_command.execute({ command: 'echo report > report.txt' });
-        await options.tools.set_plan.execute({
+        if (options.tools.run_command) await options.tools.run_command.execute({ command: 'echo report > report.txt' });
+        if (options.tools.set_plan) await options.tools.set_plan.execute({
           goal: '生成报告',
           steps: [{ title: '写入报告', verification: '检查 report.txt 内容' }],
         });
-        await options.tools.update_plan_step.execute({ id: '1', status: 'running' });
-        await options.tools.run_command.execute({ command: 'echo report > report.txt' });
+        if (options.tools.update_plan_step) await options.tools.update_plan_step.execute({ id: '1', status: 'running' });
+        if (options.tools.run_command) await options.tools.run_command.execute({ command: 'echo report > report.txt' });
       })(),
     }));
     const run = vi.fn().mockResolvedValue('ok');

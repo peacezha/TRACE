@@ -145,11 +145,13 @@ describe('dshTranslate (sdk SessionEvent)', () => {
     expect(sent).toEqual([{ type: 'step', step: 3 }]);
   });
 
-  it('translates turn/end into done with accumulated text', () => {
+  it('uses the last assistant conclusion instead of concatenating intermediate analysis', () => {
     const { sent, translator, state } = setup();
-    translator.translateEvent(sdkEvent({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '答案' }] } } }), state);
+    translator.translateEvent(sdkEvent({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '中间分析' }] } } }), state);
+    translator.translateEvent(sdkEvent({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '最终总结' }] } } }), state);
     translator.translateEvent(sdkEvent({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }), state);
-    expect(sent[1]).toEqual({ type: 'done', content: '答案' });
+    expect(sent.at(-1)).toEqual({ type: 'done', content: '最终总结' });
+    expect(sent.at(-1).content).not.toContain('中间分析');
   });
 
   it('turn/end error becomes a visible error and redacts an API key used as the URL', () => {

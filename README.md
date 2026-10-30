@@ -11,17 +11,17 @@
 
 将 AI Agent、集群作业、文件传输与可复用分析流程集中在同一个工作台。
 
-[![Version](https://img.shields.io/badge/version-v0.5.16-0969da)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)
-[![Platforms](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-supported-2ea44f)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)
+[![Version](https://img.shields.io/badge/version-v0.5.17-0969da)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)
+[![Platforms](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-supported-2ea44f)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tests](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml/badge.svg)](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml)
 
 **Windows 和 macOS 均提供直接安装的桌面软件，无需配置开发环境。**
 
-[![Windows Installer](https://img.shields.io/badge/Windows_直装版-下载-0078D4?logo=windows&logoColor=white)](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-Setup-0.5.16-x64.exe)
-[![macOS Installer](https://img.shields.io/badge/macOS_直装版-下载-24292F?logo=apple&logoColor=white)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16#桌面直装版推荐)
+[![Windows Installer](https://img.shields.io/badge/Windows_直装版-下载-0078D4?logo=windows&logoColor=white)](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-Setup-0.5.17-x64.exe)
+[![macOS Installer](https://img.shields.io/badge/macOS_直装版-下载-24292F?logo=apple&logoColor=white)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17#桌面直装版推荐)
 
-**[全部下载](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)** · [功能介绍](#功能介绍) · [快速开始](#快速开始) · [部署文档](#开发与文档)
+**[全部下载](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)** · [功能介绍](#功能介绍) · [快速开始](#快速开始) · [部署文档](#开发与文档)
 
 </div>
 
@@ -35,9 +35,9 @@
 
 | 系统 | 适用设备 | 直接下载 |
 | --- | --- | --- |
-| Windows 10/11 x64 | 普通 Windows 电脑，安装包为 `.exe` | [下载 Windows 安装程序](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-Setup-0.5.16-x64.exe) |
-| macOS Apple silicon | M1、M2、M3、M4 等 ARM 芯片 Mac，安装包为 `.dmg` | [下载 Apple silicon 版](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-mac-arm64.dmg) |
-| macOS Intel | Intel 芯片 Mac，安装包为 `.dmg` | [下载 Intel 版](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-mac-x64.dmg) |
+| Windows 10/11 x64 | 普通 Windows 电脑，安装包为 `.exe` | [下载 Windows 安装程序](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-Setup-0.5.17-x64.exe) |
+| macOS Apple silicon | M1、M2、M3、M4 等 ARM 芯片 Mac，安装包为 `.dmg` | [下载 Apple silicon 版](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-mac-arm64.dmg) |
+| macOS Intel | Intel 芯片 Mac，安装包为 `.dmg` | [下载 Intel 版](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-mac-x64.dmg) |
 
 macOS 包**未经 Apple Developer ID 签名和公证**，首次打开需按系统提示确认，当前通过 Releases 手动更新。安装与部署说明见 [macOS / 私有网页指南](docs/MAC_WEB_DEPLOYMENT.md)。
 
@@ -45,8 +45,8 @@ macOS 包**未经 Apple Developer ID 签名和公证**，首次打开需按系�
 
 | 版本 | 适用场景 | 下载 |
 | --- | --- | --- |
-| 私有网页 | Linux x64，Docker，单用户可信环境 | [TRACE-0.5.16-web-linux-x64.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-web-linux-x64.tar.gz) |
-| 公共网页 | Linux x64，Node.js/npm，多访客 | [TRACE-0.5.16-public-web-linux-x64-node20.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-public-web-linux-x64-node20.tar.gz) |
+| 私有网页 | Linux x64，Docker，单用户可信环境 | [TRACE-0.5.17-web-linux-x64.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-web-linux-x64.tar.gz) |
+| 公共网页 | Linux x64，Node.js/npm，多访客 | [TRACE-0.5.17-public-web-linux-x64-node20.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-public-web-linux-x64-node20.tar.gz) |
 
 两种网页包的部署方式和安全边界不同，请分别阅读 [私有网页](docs/MAC_WEB_DEPLOYMENT.md) 与 [公共网页](docs/PUBLIC_WEB_DEPLOYMENT.md) 指南。SHA-256 校验文件与历史版本见 [Releases](https://github.com/peacezha/TRACE/releases)。
 

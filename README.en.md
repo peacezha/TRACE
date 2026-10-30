@@ -11,17 +11,17 @@
 
 Bring AI agents, cluster jobs, file transfers and reusable analysis workflows into one workspace.
 
-[![Version](https://img.shields.io/badge/version-v0.5.16-0969da)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)
-[![Platforms](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-supported-2ea44f)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)
+[![Version](https://img.shields.io/badge/version-v0.5.17-0969da)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)
+[![Platforms](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-supported-2ea44f)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Tests](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml/badge.svg)](https://github.com/peacezha/TRACE/actions/workflows/package-windows.yml)
 
 **Ready-to-install desktop applications are available for both Windows and macOS. No development environment is required.**
 
-[![Windows Installer](https://img.shields.io/badge/Windows_Installer-Download-0078D4?logo=windows&logoColor=white)](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-Setup-0.5.16-x64.exe)
-[![macOS Installer](https://img.shields.io/badge/macOS_Installer-Download-24292F?logo=apple&logoColor=white)](https://github.com/peacezha/TRACE/releases/tag/v0.5.16#desktop-installers-recommended)
+[![Windows Installer](https://img.shields.io/badge/Windows_Installer-Download-0078D4?logo=windows&logoColor=white)](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-Setup-0.5.17-x64.exe)
+[![macOS Installer](https://img.shields.io/badge/macOS_Installer-Download-24292F?logo=apple&logoColor=white)](https://github.com/peacezha/TRACE/releases/tag/v0.5.17#desktop-installers-recommended)
 
-**[All downloads](https://github.com/peacezha/TRACE/releases/tag/v0.5.16)** · [Features](#features) · [Quick start](#quick-start) · [Documentation](#development-and-documentation)
+**[All downloads](https://github.com/peacezha/TRACE/releases/tag/v0.5.17)** · [Features](#features) · [Quick start](#quick-start) · [Documentation](#development-and-documentation)
 
 </div>
 
@@ -35,9 +35,9 @@ Download and install or open TRACE like a regular desktop application. **No sepa
 
 | System | Supported devices | Direct download |
 | --- | --- | --- |
-| Windows 10/11 x64 | Standard Windows PCs; `.exe` installer | [Download Windows installer](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-Setup-0.5.16-x64.exe) |
-| macOS Apple silicon | M1, M2, M3, M4 and other ARM-based Macs; `.dmg` image | [Download for Apple silicon](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-mac-arm64.dmg) |
-| macOS Intel | Intel-based Macs; `.dmg` image | [Download for Intel](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-mac-x64.dmg) |
+| Windows 10/11 x64 | Standard Windows PCs; `.exe` installer | [Download Windows installer](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-Setup-0.5.17-x64.exe) |
+| macOS Apple silicon | M1, M2, M3, M4 and other ARM-based Macs; `.dmg` image | [Download for Apple silicon](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-mac-arm64.dmg) |
+| macOS Intel | Intel-based Macs; `.dmg` image | [Download for Intel](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-mac-x64.dmg) |
 
 The macOS packages are **not signed with an Apple Developer ID and are not notarized**. Confirm the system prompt when opening them for the first time. Updates are currently downloaded manually from Releases. See the [macOS and private web guide](docs/MAC_WEB_DEPLOYMENT.md).
 
@@ -45,8 +45,8 @@ The macOS packages are **not signed with an Apple Developer ID and are not notar
 
 | Package | Intended use | Download |
 | --- | --- | --- |
-| Private web | Linux x64, Docker, one user in a trusted environment | [TRACE-0.5.16-web-linux-x64.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-web-linux-x64.tar.gz) |
-| Public web | Linux x64, Node.js/npm, multiple visitors | [TRACE-0.5.16-public-web-linux-x64-node20.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.16/TRACE-0.5.16-public-web-linux-x64-node20.tar.gz) |
+| Private web | Linux x64, Docker, one user in a trusted environment | [TRACE-0.5.17-web-linux-x64.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-web-linux-x64.tar.gz) |
+| Public web | Linux x64, Node.js/npm, multiple visitors | [TRACE-0.5.17-public-web-linux-x64-node20.tar.gz](https://github.com/peacezha/TRACE/releases/download/v0.5.17/TRACE-0.5.17-public-web-linux-x64-node20.tar.gz) |
 
 These packages have different deployment models and security boundaries. Read the [private web](docs/MAC_WEB_DEPLOYMENT.md) and [public web](docs/PUBLIC_WEB_DEPLOYMENT.md) guides before deployment. Checksums and previous releases are available under [Releases](https://github.com/peacezha/TRACE/releases).
 

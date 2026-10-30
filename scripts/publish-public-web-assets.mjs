@@ -41,7 +41,7 @@ for (const name of names) {
 const heading = '## 公共网页 Node.js 20 兼容更新';
 if (!release.body?.includes(heading)) {
   const body = (release.body || '') + '\n\n' + heading + '\n\n'
-    + '- 新包：' + archiveName + '。最低 Node.js 20.19.5，仍支持 Node.js 22；包含 v0.5.16 的桌面认证、提交防重、调度器、传输、敏感配置、完整答复与流程目录更新。\n'
+    + '- 新包：' + archiveName + '。最低 Node.js 20.19.5，仍支持 Node.js 22；包含 v0.5.17 的桌面认证、提交防重、调度器、传输、敏感配置、最终总结与流程目录更新。\n'
     + '- 解压后运行 `npm ci --omit=dev --ignore-scripts`，再 `npm start -- --url https://你的域名`。公网须配置 HTTPS 反向代理。\n'
     + '- [公共网页部署说明](https://github.com/peacezha/TRACE/blob/main/docs/PUBLIC_WEB_DEPLOYMENT.md)。旧 web-linux-x64 包是单用户版，不能移除口令后直接公开。\n'
     + '- 公共网页按访客隔离工作进程，私人对话和配置保存在用户自己的集群；不开放部署服务器本地命令。Node.js 20 已结束官方维护，长期公网部署建议使用受支持的 LTS。\n';
