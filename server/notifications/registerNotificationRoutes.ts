@@ -130,6 +130,7 @@ export function registerNotificationRoutes(
   app: Express,
   resolveSession: ResolveSession,
   listSessions?: ListClusterSessions,
+  onSchedulerChange?: (sessionId: string, scheduler: SchedulerType) => void,
 ): void {
   const withSession = (req: any, res: Response): NotifyRouteSession | undefined => {
     const sessionId = resolveRequestSessionId({
@@ -223,14 +224,17 @@ export function registerNotificationRoutes(
         sendError(res, 400, 'scheduler 必须是 lsf/slurm/pbs/donau/none 之一');
         return;
       }
-      const session = resolveSession(resolveRequestSessionId({
+      const sessionId = resolveRequestSessionId({
         cookie: (req.session as any)?.sshSessionId,
         header: req.get('X-SSH-Session-Id'),
         auth: undefined,
-      }, id => Boolean(resolveSession(id))) ?? undefined);
-      if (session && session.info) {
-        session.cluster.scheduler = scheduler as SchedulerType;
+      }, id => Boolean(resolveSession(id)));
+      const session = resolveSession(sessionId) ?? undefined;
+      if (sessionId && session?.info) {
+        // 先持久化再更新实时会话与后台监控；任何后续 GET、AI 提交和流程提交都读同一标签。
         await saveSchedulerTag(schedulerTagKey(session.info), { kind: scheduler });
+        session.cluster.scheduler = scheduler as SchedulerType;
+        onSchedulerChange?.(sessionId, scheduler as SchedulerType);
         res.json({ success: true, scheduler, scope: 'session' });
         return;
       }

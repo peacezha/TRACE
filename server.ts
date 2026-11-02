@@ -1070,10 +1070,10 @@ registerTransferRoutes(app, io, resolveRemoteFileSession, ensureTransferSessionA
 registerNotificationRoutes(app, (sessionId) => {
   const s = getSession(sessionId);
   if (!s) return undefined;
-  // 会话级调度器(登录探测标签)与账号信息一并下发,供按会话读取/切换;
-  // 缺 scheduler 的旧会话由路由层回退全局配置。
+  // 必须暴露实时会话对象：PUT 调度器要同时更新 AI/流程提交与后续 GET，
+  // 不能修改每次请求新建的快照副本。
   return {
-    cluster: { exec: s.cluster.exec.bind(s.cluster), scheduler: s.cluster.scheduler },
+    cluster: s.cluster,
     info: { username: s.info.username, host: s.info.host, port: s.info.port },
   };
 }, () => [...sessions.values()].map(s => ({
@@ -1083,7 +1083,7 @@ registerNotificationRoutes(app, (sessionId) => {
   username: s.info.username,
   state: s.cluster.state,
   cluster: { exec: s.cluster.exec.bind(s.cluster), scheduler: s.cluster.scheduler },
-})));
+})), (sessionId, scheduler) => jobWatcher.setScheduler(sessionId, scheduler));
 {
   enableRequestedCatalogueCleanup();
   registerWorkflowRoutes(app);

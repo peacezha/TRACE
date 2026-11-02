@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within, waitFor, act } from '@testing-library/react';
 import JobsPanel from './JobsPanel';
 
 interface MockData {
@@ -116,5 +116,40 @@ describe('JobsPanel 通知渠道提示', () => {
     mockFetch({ scheduler: 'unknown', events: [] });
     render(<JobsPanel isOpen onClose={() => undefined} sessionId="ssh-1" />);
     expect(await screen.findByDisplayValue('调度器未知')).toBeInTheDocument();
+  });
+
+  it('切换期间到达的旧刷新响应不会把正确选择覆盖回旧值', async () => {
+    let current = 'lsf';
+    let schedulerReads = 0;
+    let releaseInitial!: () => void;
+    const initialGate = new Promise<void>(resolve => { releaseInitial = resolve; });
+    const respond = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as Response;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/jobs/scheduler')) {
+        if (options?.method === 'PUT') {
+          current = 'slurm';
+          return respond({ success: true, scheduler: current });
+        }
+        schedulerReads += 1;
+        if (schedulerReads === 1) {
+          const stale = current;
+          await initialGate;
+          return respond({ scheduler: stale });
+        }
+        return respond({ scheduler: current });
+      }
+      if (url.includes('/api/jobs/events')) return respond({ events: [] });
+      if (url.includes('/api/notify/config')) return respond({ config: null });
+      return respond({ jobs: [], processes: [] });
+    }));
+    render(<JobsPanel isOpen onClose={() => undefined} sessionId="ssh-1" />);
+    await waitFor(() => expect(schedulerReads).toBe(1));
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'slurm' } });
+    await waitFor(() => expect(schedulerReads).toBe(2));
+    expect(screen.getByDisplayValue('Slurm')).toBeInTheDocument();
+    await act(async () => { releaseInitial(); });
+    expect(screen.getByDisplayValue('Slurm')).toBeInTheDocument();
   });
 });

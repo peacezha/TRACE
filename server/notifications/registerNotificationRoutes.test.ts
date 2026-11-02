@@ -28,6 +28,15 @@ vi.mock('./notifyService', () => ({
   sendNotification: vi.fn(),
 }));
 
+const schedulerProfileMocks = vi.hoisted(() => ({
+  save: vi.fn(async () => ({ kind: 'slurm', detectedAt: Date.now() })),
+}));
+
+vi.mock('../cluster/schedulerProfile', async importOriginal => {
+  const actual = await importOriginal<typeof import('../cluster/schedulerProfile')>();
+  return { ...actual, saveSchedulerTag: schedulerProfileMocks.save };
+});
+
 const servers: http.Server[] = [];
 
 afterEach(async () => {
@@ -210,6 +219,54 @@ describe('GET /api/jobs/summary（重构后共用采集逻辑）', () => {
     expect(body.jobs).toHaveLength(2);
     expect(body.jobs[0]).toMatchObject({ jobId: '201', status: 'RUN' });
     expect(typeof body.updatedAt).toBe('number');
+  });
+});
+
+describe('PUT /api/jobs/scheduler', () => {
+  it('更新实时会话、账号标签和后台监控，刷新与作业查询不再跳回旧调度器', async () => {
+    schedulerProfileMocks.save.mockClear();
+    const commands: string[] = [];
+    const session = {
+      cluster: {
+        scheduler: 'lsf' as ListedClusterSession['cluster']['scheduler'],
+        exec: async (command: string) => { commands.push(command); return SQUEUE_OUTPUT; },
+      },
+      info: { username: 'tester', host: 'hpc.example.edu', port: 22 },
+    };
+    const onSchedulerChange = vi.fn();
+    const app = express();
+    app.use(express.json());
+    registerNotificationRoutes(
+      app,
+      sessionId => (sessionId === 'sess-live' ? session : undefined),
+      () => [],
+      onSchedulerChange,
+    );
+    const server = http.createServer(app);
+    servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const headers = { 'X-SSH-Session-Id': 'sess-live', 'Content-Type': 'application/json' };
+
+    const before = await (await fetch(`${baseUrl}/api/jobs/scheduler`, { headers })).json();
+    expect(before.scheduler).toBe('lsf');
+    const putRes = await fetch(`${baseUrl}/api/jobs/scheduler`, {
+      method: 'PUT', headers, body: JSON.stringify({ scheduler: 'slurm' }),
+    });
+    expect(putRes.status).toBe(200);
+    expect(schedulerProfileMocks.save).toHaveBeenCalledWith('tester@hpc.example.edu:22', { kind: 'slurm' });
+    expect(onSchedulerChange).toHaveBeenCalledWith('sess-live', 'slurm');
+    expect(session.cluster.scheduler).toBe('slurm');
+
+    const after = await (await fetch(`${baseUrl}/api/jobs/scheduler`, { headers })).json();
+    expect(after.scheduler).toBe('slurm');
+    const jobsRes = await fetch(`${baseUrl}/api/jobs`, { headers });
+    const jobs = await jobsRes.json();
+    expect(jobs.scheduler).toBe('slurm');
+    expect(commands.some(command => command.includes('squeue'))).toBe(true);
+    expect(commands.some(command => command.includes('bjobs'))).toBe(false);
   });
 });
 

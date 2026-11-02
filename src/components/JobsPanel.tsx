@@ -126,8 +126,10 @@ export default function JobsPanel({ isOpen, onClose, sessionId }: JobsPanelProps
   // 完成事件展开状态：key 为 jobId-time 序号组合，值是否展开输出摘要
   const [expandedEvents, setExpandedEvents] = useState<Record<string, boolean>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
+  const schedulerChangeRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const schedulerChange = schedulerChangeRef.current;
     setLoading(true);
     setError('');
     try {
@@ -143,7 +145,10 @@ export default function JobsPanel({ isOpen, onClose, sessionId }: JobsPanelProps
       } else setError(jobsRes.data?.error || '获取作业失败');
       if (eventsRes.ok) setEvents(eventsRes.data.events || []);
       if (configRes.ok) setConfig(configRes.data.config);
-      if (schedulerRes.ok) setScheduler(normalizeSchedulerType(schedulerRes.data.scheduler));
+      // 切换前已发出的慢刷新可能带着旧标签返回，不能覆盖用户刚保存的选择。
+      if (schedulerRes.ok && schedulerChange === schedulerChangeRef.current) {
+        setScheduler(normalizeSchedulerType(schedulerRes.data.scheduler));
+      }
     } catch (e: any) {
       setError(e.message || '网络错误');
     } finally {
@@ -152,16 +157,22 @@ export default function JobsPanel({ isOpen, onClose, sessionId }: JobsPanelProps
   }, [sessionId]);
 
   const handleSchedulerChange = async (next: SchedulerType) => {
+    schedulerChangeRef.current += 1;
     setScheduler(next);
-    const { ok } = await api('/api/jobs/scheduler', {
+    setError('');
+    const { ok, data } = await api('/api/jobs/scheduler', {
       method: 'PUT',
       body: JSON.stringify({ scheduler: next }),
     }, sessionId);
-    if (ok) void refresh();
+    // 成功读取实时会话的新标签；失败则读回服务端原值并给出错误。
+    void refresh();
+    if (!ok) setError(data?.error || '调度器切换失败，请重试');
   };
 
   useEffect(() => {
     if (!isOpen) return;
+    // 切换集群标签页后，上一集群尚未完成的响应也不能覆盖当前选择。
+    schedulerChangeRef.current += 1;
     void refresh();
     const timer = setInterval(() => void refresh(), 30_000);
     return () => clearInterval(timer);
